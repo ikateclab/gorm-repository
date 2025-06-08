@@ -218,12 +218,11 @@ func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID,
 	originalClone := cloneable.Clone()
 
 	// Apply the update function to modify the entity in place
-	modifiedEntity := entity
-	updateFunc(modifiedEntity)
+	updateFunc(entity)
 
-	// Generate diff between original clone and modified entity
-	// We need to use the modified entity as the base for the diff to get the new values
-	modifiedDiffable, ok := any(modifiedEntity).(Diffable[T])
+	// Generate diff between modified entity and original clone
+	// The diff should contain the new values from the modified entity
+	modifiedDiffable, ok := any(entity).(Diffable[T])
 	if !ok {
 		return fmt.Errorf("modified entity does not support diffing")
 	}
@@ -234,8 +233,8 @@ func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID,
 		return nil
 	}
 
-	// Perform the update using the diff
-	return db.Model(&modifiedEntity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	// Perform the update using the diff and return the updated entity
+	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
 func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error {
