@@ -2,7 +2,7 @@ package tests
 
 import (
 	"context"
-	"github.com/ikateclab/gorm-repository/repositories"
+	gr "github.com/ikateclab/gorm-repository"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,7 +10,7 @@ import (
 )
 
 // CreateTestUsers creates multiple test users in the database
-func CreateTestUsers(t *testing.T, repo *repositories.GormRepository[TestUser], count int) []TestUser {
+func CreateTestUsers(t *testing.T, repo *gr.GormRepository[TestUser], count int) []TestUser {
 	t.Helper()
 	ctx := context.Background()
 	users := make([]TestUser, count)
@@ -34,7 +34,7 @@ func CreateTestUsers(t *testing.T, repo *repositories.GormRepository[TestUser], 
 }
 
 // AssertPaginationResult validates pagination result structure
-func AssertPaginationResult(t *testing.T, result *repositories.PaginationResult[TestUser], expectedTotal int64, expectedPage int, expectedPageSize int, message string) {
+func AssertPaginationResult(t *testing.T, result *gr.PaginationResult[TestUser], expectedTotal int64, expectedPage int, expectedPageSize int, message string) {
 	t.Helper()
 
 	if result.Total != expectedTotal {
@@ -61,7 +61,7 @@ func TestSuite_UsingHelpers(t *testing.T) {
 	db := SetupTestDBWithConfig(t, DefaultTestDBConfig())
 	defer CleanupTestDB(t, db)
 
-	repo := &repositories.GormRepository[TestUser]{DB: db}
+	repo := &gr.GormRepository[TestUser]{DB: db}
 	ctx := context.Background()
 
 	t.Run("CreateUsersWithBuilder", func(t *testing.T) {
@@ -119,8 +119,8 @@ func TestSuite_ProfileIntegration(t *testing.T) {
 	db := SetupTestDBWithConfig(t, DefaultTestDBConfig())
 	defer CleanupTestDB(t, db)
 
-	userRepo := &repositories.GormRepository[TestUser]{DB: db}
-	profileRepo := &repositories.GormRepository[TestProfile]{DB: db}
+	userRepo := &gr.GormRepository[TestUser]{DB: db}
+	profileRepo := &gr.GormRepository[TestProfile]{DB: db}
 	ctx := context.Background()
 
 	t.Run("UserWithProfile", func(t *testing.T) {
@@ -146,7 +146,7 @@ func TestSuite_ProfileIntegration(t *testing.T) {
 		}
 
 		// Find user with profile
-		foundUser, err := userRepo.FindById(ctx, user.ID, repositories.WithRelations("Profile"))
+		foundUser, err := userRepo.FindById(ctx, user.ID, gr.WithRelations("Profile"))
 		if err != nil {
 			t.Fatalf("Failed to find user with profile: %v", err)
 		}
@@ -167,9 +167,9 @@ func TestSuite_PostsAndTags(t *testing.T) {
 	db := SetupTestDBWithConfig(t, DefaultTestDBConfig())
 	defer CleanupTestDB(t, db)
 
-	userRepo := &repositories.GormRepository[TestUser]{DB: db}
-	postRepo := &repositories.GormRepository[TestPost]{DB: db}
-	tagRepo := &repositories.GormRepository[TestTag]{DB: db}
+	userRepo := &gr.GormRepository[TestUser]{DB: db}
+	postRepo := &gr.GormRepository[TestPost]{DB: db}
+	tagRepo := &gr.GormRepository[TestTag]{DB: db}
 	ctx := context.Background()
 
 	t.Run("UserWithPostsAndTags", func(t *testing.T) {
@@ -229,7 +229,7 @@ func TestSuite_PostsAndTags(t *testing.T) {
 		}
 
 		// Find user with posts and their tags
-		foundUser, err := userRepo.FindById(ctx, user.ID, repositories.WithRelations("Posts", "Posts.Tags"))
+		foundUser, err := userRepo.FindById(ctx, user.ID, gr.WithRelations("Posts", "Posts.Tags"))
 		if err != nil {
 			t.Fatalf("Failed to find user with posts and tags: %v", err)
 		}
@@ -247,10 +247,10 @@ func TestSuite_PostsAndTags(t *testing.T) {
 
 		// Find published posts only
 		publishedPosts, err := postRepo.FindMany(ctx,
-			repositories.WithQuery(func(db *gorm.DB) *gorm.DB {
+			gr.WithQuery(func(db *gorm.DB) *gorm.DB {
 				return db.Where("user_id = ? AND published = ?", user.ID, true)
 			}),
-			repositories.WithRelations("Tags"),
+			gr.WithRelations("Tags"),
 		)
 		if err != nil {
 			t.Fatalf("Failed to find published posts: %v", err)
@@ -269,8 +269,8 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 	db := SetupTestDBWithConfig(t, DefaultTestDBConfig())
 	defer CleanupTestDB(t, db)
 
-	userRepo := &repositories.GormRepository[TestUser]{DB: db}
-	profileRepo := &repositories.GormRepository[TestProfile]{DB: db}
+	userRepo := &gr.GormRepository[TestUser]{DB: db}
+	profileRepo := &gr.GormRepository[TestProfile]{DB: db}
 	ctx := context.Background()
 
 	t.Run("ComplexTransactionSuccess", func(t *testing.T) {
@@ -284,7 +284,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 			WithEmail("transaction@example.com").
 			Build()
 
-		err = userRepo.Create(ctx, user, repositories.WithTx(tx))
+		err = userRepo.Create(ctx, user, gr.WithTx(tx))
 		if err != nil {
 			t.Errorf("Failed to create user in transaction: %v", err)
 			return
@@ -295,7 +295,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 			WithBio("Transaction profile bio").
 			Build()
 
-		err = profileRepo.Create(ctx, profile, repositories.WithTx(tx))
+		err = profileRepo.Create(ctx, profile, gr.WithTx(tx))
 		if err != nil {
 			t.Errorf("Failed to create profile in transaction: %v", err)
 			return
@@ -305,7 +305,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 	})
 
 	// Verify both user and profile were created
-	users, err := userRepo.FindMany(ctx, repositories.WithQuery(func(db *gorm.DB) *gorm.DB {
+	users, err := userRepo.FindMany(ctx, gr.WithQuery(func(db *gorm.DB) *gorm.DB {
 		return db.Where("email = ?", "transaction@example.com")
 	}))
 	if err != nil {
@@ -315,7 +315,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 		t.Errorf("Expected 1 transaction user, got %d", len(users))
 	}
 
-	profiles, err := profileRepo.FindMany(ctx, repositories.WithQuery(func(db *gorm.DB) *gorm.DB {
+	profiles, err := profileRepo.FindMany(ctx, gr.WithQuery(func(db *gorm.DB) *gorm.DB {
 		return db.Where("user_id = ?", users[0].ID)
 	}))
 	if err != nil {
@@ -336,7 +336,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 			WithEmail("failed@example.com").
 			Build()
 
-		err = userRepo.Create(ctx, user, repositories.WithTx(tx))
+		err = userRepo.Create(ctx, user, gr.WithTx(tx))
 		if err != nil {
 			t.Errorf("Failed to create user in transaction: %v", err)
 			return
@@ -349,7 +349,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 	})
 
 	// Verify user was not created due to rollback
-	failedUsers, err := userRepo.FindMany(ctx, repositories.WithQuery(func(db *gorm.DB) *gorm.DB {
+	failedUsers, err := userRepo.FindMany(ctx, gr.WithQuery(func(db *gorm.DB) *gorm.DB {
 		return db.Where("email = ?", "failed@example.com")
 	}))
 	if err != nil {

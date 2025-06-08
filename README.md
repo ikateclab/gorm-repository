@@ -24,7 +24,7 @@ go get github.com/ikateclab/gorm-repository
 
 ```go
 import (
-    "github.com/ikateclab/gorm-repository/repositories"
+    gr "github.com/ikateclab/gorm-repository"
     "gorm.io/gorm"
 )
 
@@ -38,7 +38,7 @@ type User struct {
 
 // Initialize repository
 db := // your GORM database instance
-userRepo := repositories.NewGormRepository[User](db)
+userRepo := gr.NewGormRepository[User](db)
 
 // Basic operations
 ctx := context.Background()
@@ -51,8 +51,8 @@ err := userRepo.Create(ctx, user)
 user, err := userRepo.FindById(ctx, userID)
 
 // Find many with options
-users, err := userRepo.FindMany(ctx, 
-    repositories.WithQuery(func(db *gorm.DB) *gorm.DB {
+users, err := userRepo.FindMany(ctx,
+    gr.WithQuery(func(db *gorm.DB) *gorm.DB {
         return db.Where("age > ?", 18)
     }),
 )
@@ -97,11 +97,11 @@ tx := userRepo.BeginTransaction()
 defer tx.Finish(&err)
 
 // Find and modify
-user, err := userRepo.FindById(ctx, userID, repositories.WithTx(tx))
+user, err := userRepo.FindById(ctx, userID, gr.WithTx(tx))
 user.Name = "Updated Name"
 
 // Only changed fields will be updated
-err = userRepo.UpdateById(ctx, userID, user, repositories.WithTx(tx))
+err = userRepo.UpdateById(ctx, userID, user, gr.WithTx(tx))
 ```
 
 ### Transaction Management
@@ -117,12 +117,12 @@ defer func() {
     }
 }()
 
-err = userRepo.Create(ctx, user1, repositories.WithTx(tx))
+err = userRepo.Create(ctx, user1, gr.WithTx(tx))
 if err != nil {
     return err
 }
 
-err = userRepo.Create(ctx, user2, repositories.WithTx(tx))
+err = userRepo.Create(ctx, user2, gr.WithTx(tx))
 if err != nil {
     return err
 }
@@ -131,25 +131,25 @@ if err != nil {
 tx := userRepo.BeginTransaction()
 defer tx.Finish(&err) // Automatically commits or rolls back based on err
 
-err = userRepo.Create(ctx, user1, repositories.WithTx(tx))
+err = userRepo.Create(ctx, user1, gr.WithTx(tx))
 if err != nil {
     return err
 }
 
-err = userRepo.Create(ctx, user2, repositories.WithTx(tx))
+err = userRepo.Create(ctx, user2, gr.WithTx(tx))
 ```
 
 ### Advanced Querying
 
 ```go
 // With relations
-users, err := userRepo.FindMany(ctx, 
-    repositories.WithRelations("Profile", "Posts"),
+users, err := userRepo.FindMany(ctx,
+    gr.WithRelations("Profile", "Posts"),
 )
 
 // Custom query
 users, err := userRepo.FindMany(ctx,
-    repositories.WithQuery(func(db *gorm.DB) *gorm.DB {
+    gr.WithQuery(func(db *gorm.DB) *gorm.DB {
         return db.Where("age BETWEEN ? AND ?", 18, 65).
                  Order("created_at DESC")
     }),
@@ -157,7 +157,7 @@ users, err := userRepo.FindMany(ctx,
 
 // Query with struct
 users, err := userRepo.FindMany(ctx,
-    repositories.WithQueryStruct(map[string]interface{}{
+    gr.WithQueryStruct(map[string]interface{}{
         "active": true,
         "age":    25,
     }),
