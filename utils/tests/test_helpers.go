@@ -230,8 +230,6 @@ func AssertUserEqual(t *testing.T, expected, actual TestUser, message string) {
 	}
 }
 
-
-
 // CleanupTestDB removes all data from test tables
 func CleanupTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
@@ -244,5 +242,3 @@ func CleanupTestDB(t *testing.T, db *gorm.DB) {
 	db.Exec("DELETE FROM test_users")
 	db.Exec("DELETE FROM test_simple_entities")
 }
-
-

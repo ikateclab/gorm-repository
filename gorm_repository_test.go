@@ -32,8 +32,8 @@ func setupTestDB(t *testing.T) *gorm.DB {
 }
 
 // createTestUser creates a test user for testing
-func createTestUser() tests.TestUser {
-	return tests.TestUser{
+func createTestUser() *tests.TestUser {
+	return &tests.TestUser{
 		ID:     uuid.New(),
 		Name:   "John Doe",
 		Email:  "john@example.com",
@@ -44,7 +44,7 @@ func createTestUser() tests.TestUser {
 
 func TestGormRepository_Create(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -64,7 +64,7 @@ func TestGormRepository_Create(t *testing.T) {
 
 func TestGormRepository_FindById(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -88,7 +88,7 @@ func TestGormRepository_FindById(t *testing.T) {
 
 func TestGormRepository_FindOne(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -111,11 +111,11 @@ func TestGormRepository_FindOne(t *testing.T) {
 
 func TestGormRepository_FindMany(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	// Create multiple users
-	users := []tests.TestUser{
+	users := []*tests.TestUser{
 		{ID: uuid.New(), Name: "User 1", Email: "user1@example.com", Age: 25, Active: true},
 		{ID: uuid.New(), Name: "User 2", Email: "user2@example.com", Age: 30, Active: true},
 		{ID: uuid.New(), Name: "User 3", Email: "user3@example.com", Age: 35, Active: false},
@@ -143,12 +143,12 @@ func TestGormRepository_FindMany(t *testing.T) {
 
 func TestGormRepository_FindPaginated(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	// Create 10 test users
 	for i := 0; i < 10; i++ {
-		user := tests.TestUser{
+		user := &tests.TestUser{
 			ID:     uuid.New(),
 			Name:   "User " + string(rune(i+'1')),
 			Email:  "user" + string(rune(i+'1')) + "@example.com",
@@ -183,7 +183,7 @@ func TestGormRepository_FindPaginated(t *testing.T) {
 
 func TestGormRepository_Save(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -217,7 +217,7 @@ func TestGormRepository_Save(t *testing.T) {
 
 func TestGormRepository_DeleteById(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -241,7 +241,7 @@ func TestGormRepository_DeleteById(t *testing.T) {
 
 func TestGormRepository_WithRelations(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	// Create user with profile
@@ -279,11 +279,11 @@ func TestGormRepository_WithRelations(t *testing.T) {
 
 func TestGormRepository_WithQuery(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	// Create users with different ages
-	users := []tests.TestUser{
+	users := []*tests.TestUser{
 		{ID: uuid.New(), Name: "Young User", Email: "young@example.com", Age: 20, Active: true},
 		{ID: uuid.New(), Name: "Old User", Email: "old@example.com", Age: 50, Active: true},
 	}
@@ -313,7 +313,7 @@ func TestGormRepository_WithQuery(t *testing.T) {
 
 func TestGormRepository_WithQueryStruct(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -341,7 +341,7 @@ func TestGormRepository_WithQueryStruct(t *testing.T) {
 
 func TestGormRepository_Transaction_Commit(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	tx := repo.BeginTransaction()
@@ -373,7 +373,7 @@ func TestGormRepository_Transaction_Commit(t *testing.T) {
 
 func TestGormRepository_Transaction_Rollback(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	tx := repo.BeginTransaction()
@@ -400,7 +400,7 @@ func TestGormRepository_Transaction_Rollback(t *testing.T) {
 
 func TestGormRepository_Transaction_Finish_Success(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	var err error
@@ -420,7 +420,7 @@ func TestGormRepository_Transaction_Finish_Success(t *testing.T) {
 
 func TestGormRepository_Transaction_Finish_Error(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	var err error
@@ -443,7 +443,7 @@ func TestGormRepository_Transaction_Finish_Error(t *testing.T) {
 
 func TestGormRepository_UpdateByIdWithMap(t *testing.T) {
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()
@@ -472,9 +472,8 @@ func TestGormRepository_UpdateByIdWithMap(t *testing.T) {
 }
 
 func TestGormRepository_UpdateByIdInPlace(t *testing.T) {
-	t.Skip("Skipping UpdateByIdInPlace test - needs further implementation")
 	db := setupTestDB(t)
-	repo := &GormRepository[tests.TestUser]{DB: db}
+	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
 	user := createTestUser()

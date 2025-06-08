@@ -51,10 +51,10 @@ func TestIntegration_CompleteUserWorkflow(t *testing.T) {
 
 	// Create a profile for the user
 	profile := tests.TestProfile{
-		ID:      uuid.New(),
-		UserID:  user.ID,
-		Bio:     "Integration test bio",
-		Website: "https://integration.example.com",
+		ID:       uuid.New(),
+		UserID:   user.ID,
+		Bio:      "Integration test bio",
+		Website:  "https://integration.example.com",
 		Settings: `{"theme":"dark","language":"en"}`,
 	}
 

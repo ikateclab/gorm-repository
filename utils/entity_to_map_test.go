@@ -7,13 +7,13 @@ import (
 
 // Test entity for entity_to_map tests
 type TestEntity struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Age      int    `json:"age"`
-	Active   bool   `json:"active"`
+	ID       int                    `json:"id"`
+	Name     string                 `json:"name"`
+	Email    string                 `json:"email"`
+	Age      int                    `json:"age"`
+	Active   bool                   `json:"active"`
 	Settings map[string]interface{} `json:"settings"`
-	Profile  *TestProfile `json:"profile"`
+	Profile  *TestProfile           `json:"profile"`
 }
 
 type TestProfile struct {

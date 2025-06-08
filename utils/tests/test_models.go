@@ -19,9 +19,12 @@ type TestUser struct {
 	UpdatedAt time.Time    `json:"updatedAt"`
 }
 
-// Clone implements the Cloneable interface
-func (u TestUser) Clone() TestUser {
-	clone := u
+// Clone implements the Diffable interface for pointer types
+func (u *TestUser) Clone() *TestUser {
+	if u == nil {
+		return nil
+	}
+	clone := *u
 	if u.Profile != nil {
 		profileClone := *u.Profile
 		clone.Profile = &profileClone
@@ -30,11 +33,15 @@ func (u TestUser) Clone() TestUser {
 		clone.Posts = make([]TestPost, len(u.Posts))
 		copy(clone.Posts, u.Posts)
 	}
-	return clone
+	return &clone
 }
 
-// Diff implements the Diffable interface
-func (u TestUser) Diff(other TestUser) map[string]interface{} {
+// Diff implements the Diffable interface for pointer types
+func (u *TestUser) Diff(other *TestUser) map[string]interface{} {
+	if u == nil || other == nil {
+		return make(map[string]interface{})
+	}
+
 	diff := make(map[string]interface{})
 
 	if u.Name != other.Name {
@@ -55,11 +62,11 @@ func (u TestUser) Diff(other TestUser) map[string]interface{} {
 
 // TestProfile represents a user profile for testing relationships
 type TestProfile struct {
-	ID       uuid.UUID              `gorm:"type:text;primary_key" json:"id"`
-	UserID   uuid.UUID              `gorm:"type:text;not null" json:"userId"`
-	Bio      string                 `json:"bio"`
-	Website  string                 `json:"website"`
-	Settings string `gorm:"type:text" json:"settings"`
+	ID       uuid.UUID `gorm:"type:text;primary_key" json:"id"`
+	UserID   uuid.UUID `gorm:"type:text;not null" json:"userId"`
+	Bio      string    `json:"bio"`
+	Website  string    `json:"website"`
+	Settings string    `gorm:"type:text" json:"settings"`
 }
 
 // TestPost represents a blog post for testing one-to-many relationships
@@ -87,13 +94,21 @@ type TestSimpleEntity struct {
 	Value string    `json:"value"`
 }
 
-// Clone implements the Cloneable interface
-func (e TestSimpleEntity) Clone() TestSimpleEntity {
-	return e
+// Clone implements the Diffable interface for pointer types
+func (e *TestSimpleEntity) Clone() *TestSimpleEntity {
+	if e == nil {
+		return nil
+	}
+	clone := *e
+	return &clone
 }
 
-// Diff implements the Diffable interface
-func (e TestSimpleEntity) Diff(other TestSimpleEntity) map[string]interface{} {
+// Diff implements the Diffable interface for pointer types
+func (e *TestSimpleEntity) Diff(other *TestSimpleEntity) map[string]interface{} {
+	if e == nil || other == nil {
+		return make(map[string]interface{})
+	}
+
 	diff := make(map[string]interface{})
 	if e.Value != other.Value {
 		diff["value"] = e.Value
