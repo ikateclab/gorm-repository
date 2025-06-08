@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+
+      - name: Run tests
+        run: |
+          go mod tidy
+          go test ./...
+
+      - name: Run benchmarks
+        run: go test -bench=. ./...
+
+      - name: Extract tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          TAG_NAME="${{ steps.tag.outputs.tag }}"
+          
+          # Create release notes
+          cat > release_notes.md << 'EOF'
+          ## GORM Repository ${{ steps.tag.outputs.tag }}
+          
+          A generic repository pattern implementation for GORM with advanced features.
+          
+          ### Features
+          - **Generic Repository Pattern**: Type-safe repository operations using Go generics
+          - **Transaction Management**: Built-in transaction support with automatic rollback/commit
+          - **Entity Diffing**: Track and update only changed fields using the `Diffable` interface
+          - **Pagination**: Built-in pagination with comprehensive metadata
+          - **Association Management**: Append, remove, and replace entity associations
+          - **Flexible Querying**: Functional options for customizing queries
+          - **Utilities**: CamelCase naming strategy and entity-to-map conversion
+          
+          ### Installation
+          ```bash
+          go get github.com/ikateclab/gorm-repository@${{ steps.tag.outputs.tag }}
+          ```
+          
+          ### Requirements
+          - Go 1.24+
+          - GORM v1.30+
+          - UUID support via `github.com/google/uuid`
+          
+          ### Documentation
+          See the [README](https://github.com/ikateclab/gorm-repository#readme) for complete usage examples and API documentation.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
