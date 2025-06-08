@@ -192,7 +192,7 @@ type Repository[T any] interface {
     UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error
     UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity T, options ...Option) error
     UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (T, error)
-    UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity Diffable[T], updateFunc func(Diffable[T]), options ...Option) error
+    UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(), options ...Option) error
     DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error
     BeginTransaction() *Tx
     AppendAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error

@@ -378,10 +378,10 @@ func TestGormRepository_UpdateByIdInPlace(t *testing.T) {
 	err := repo.Create(ctx, user)
 	require.NoError(t, err, "Failed to create test user")
 
-	// Update in place
-	err = repo.UpdateByIdInPlace(ctx, user.ID, user, func(u *tests.TestUser) {
-		u.Name = "In-Place Updated Name"
-		u.Age = 40
+	// Update in place - the updateFunc takes no parameters and modifies the entity directly
+	err = repo.UpdateByIdInPlace(ctx, user.ID, user, func() {
+		user.Name = "In-Place Updated Name"
+		user.Age = 40
 	})
 	require.NoError(t, err, "UpdateByIdInPlace should not fail")
 

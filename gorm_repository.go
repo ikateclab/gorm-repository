@@ -160,10 +160,10 @@ func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID
 func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
-	// Check if we're in a transaction context
+	// Get transaction context
 	txInterface, exists := db.Get(txContextKey)
 	if !exists {
-		return fmt.Errorf("UpdateById requires a transaction context with a cloned entity - use WithTx option and ensure entity implements Cloneable[T] and Diffable[T] interfaces")
+		return fmt.Errorf("UpdateById requires a transaction context - use WithTx option")
 	}
 
 	tx, ok := txInterface.(*Tx)
@@ -171,62 +171,46 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 		return fmt.Errorf("invalid transaction context")
 	}
 
-	// Check if the entity was cloned
-	entityKey := generateEntityKey(entity)
-	cloneInterface, found := tx.getClonedEntity(entityKey)
+	// Get cloned entity
+	cloneInterface, found := tx.getClonedEntity(generateEntityKey(entity))
 	if !found {
-		return fmt.Errorf("entity was not cloned in this transaction - use FindById or FindOne with WithTx option to clone the entity first")
+		return fmt.Errorf("entity not cloned in transaction - use FindById/FindOne with WithTx first")
 	}
 
-	// Verify entity supports diffing
-	if _, ok := any(entity).(Diffable[T]); !ok {
-		return fmt.Errorf("entity does not support diffing - entity must implement Diffable[T] interface")
-	}
-
-	// Verify clone is the correct type
 	clone, ok := cloneInterface.(T)
 	if !ok {
 		return fmt.Errorf("cloned entity type mismatch")
 	}
 
-	// Verify clone supports diffing
-	cloneDiffable, ok := any(clone).(Diffable[T])
+	// Generate diff
+	diffable, ok := any(entity).(Diffable[T])
 	if !ok {
-		return fmt.Errorf("cloned entity does not support diffing")
+		return fmt.Errorf("entity must implement Diffable[T] interface")
 	}
 
-	// Generate diff between stored clone and current entity
-	diff := cloneDiffable.Diff(entity)
+	diff := diffable.Diff(clone)
 	if len(diff) == 0 {
-		// No changes, nothing to update
-		return nil
+		return nil // No changes
 	}
 
-	// Perform the update using the diff
 	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
-func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(T), options ...Option) error {
+func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(), options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
-	cloneable, isDiffable := any(entity).(Diffable[T])
+	diffable, isDiffable := any(entity).(Diffable[T])
 	if !isDiffable {
 		return fmt.Errorf("entity does not support diffing - entity must implement Diffable[T] interface")
 	}
 
 	// Clone the original entity to use for diff generation
-	originalClone := cloneable.Clone()
+	originalClone := diffable.Clone()
 
 	// Apply the update function to modify the entity in place
-	updateFunc(entity)
+	updateFunc()
 
-	// Generate diff between modified entity and original clone
-	// The diff should contain the new values from the modified entity
-	modifiedDiffable, ok := any(entity).(Diffable[T])
-	if !ok {
-		return fmt.Errorf("modified entity does not support diffing")
-	}
-	diff := modifiedDiffable.Diff(originalClone)
+	diff := diffable.Diff(originalClone)
 
 	if len(diff) == 0 {
 		// No changes, nothing to update
