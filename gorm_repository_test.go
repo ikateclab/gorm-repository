@@ -392,3 +392,110 @@ func TestGormRepository_UpdateByIdInPlace(t *testing.T) {
 	require.Equal(t, "In-Place Updated Name", updatedUser.Name, "Expected updated name 'In-Place Updated Name'")
 	require.Equal(t, 40, updatedUser.Age, "Expected updated age 40")
 }
+
+func TestGormRepository_UpdateInPlace(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Update in place without explicit ID - GORM should extract the primary key from the entity
+	err = repo.UpdateInPlace(ctx, user, func() {
+		user.Name = "UpdateInPlace Name"
+		user.Age = 45
+	})
+	require.NoError(t, err, "UpdateInPlace should not fail")
+
+	// Verify the update
+	updatedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.Equal(t, "UpdateInPlace Name", updatedUser.Name, "Expected updated name 'UpdateInPlace Name'")
+	require.Equal(t, 45, updatedUser.Age, "Expected updated age 45")
+}
+
+func TestGormRepository_UpdateInPlace_NoChanges(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Update in place with no actual changes
+	err = repo.UpdateInPlace(ctx, user, func() {
+		// No changes made to the entity
+	})
+	require.NoError(t, err, "UpdateInPlace with no changes should not fail")
+
+	// Verify no changes were made
+	unchangedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find user")
+
+	require.Equal(t, user.Name, unchangedUser.Name, "Name should remain unchanged")
+	require.Equal(t, user.Age, unchangedUser.Age, "Age should remain unchanged")
+}
+
+func TestGormRepository_UpdateInPlace_NonDiffableEntity(t *testing.T) {
+	// This test would require a non-diffable entity type, but since our TestUser implements Diffable,
+	// we'll test the error condition by using a different approach
+	db := setupTestDB(t)
+
+	// Create a repository for a type that doesn't implement Diffable
+	// For this test, we'll use a simple struct that doesn't implement the interface
+	type NonDiffableEntity struct {
+		ID   uuid.UUID `gorm:"type:text;primary_key"`
+		Name string
+	}
+
+	repo := &GormRepository[NonDiffableEntity]{DB: db}
+	ctx := context.Background()
+
+	entity := NonDiffableEntity{
+		ID:   uuid.New(),
+		Name: "Test",
+	}
+
+	// This should fail because NonDiffableEntity doesn't implement Diffable
+	err := repo.UpdateInPlace(ctx, entity, func() {
+		entity.Name = "Updated"
+	})
+	require.Error(t, err, "UpdateInPlace should fail for non-diffable entity")
+	require.Contains(t, err.Error(), "entity does not support diffing", "Error should mention diffing requirement")
+}
+
+func TestGormRepository_UpdateInPlace_MultipleFields(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	originalName := user.Name
+	originalAge := user.Age
+	originalActive := user.Active
+
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Update multiple fields in place
+	err = repo.UpdateInPlace(ctx, user, func() {
+		user.Name = "Multi-Field Update"
+		user.Age = 99
+		user.Active = !originalActive
+	})
+	require.NoError(t, err, "UpdateInPlace with multiple fields should not fail")
+
+	// Verify all updates
+	updatedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.Equal(t, "Multi-Field Update", updatedUser.Name, "Name should be updated")
+	require.Equal(t, 99, updatedUser.Age, "Age should be updated")
+	require.Equal(t, !originalActive, updatedUser.Active, "Active status should be toggled")
+	require.NotEqual(t, originalName, updatedUser.Name, "Name should be different from original")
+	require.NotEqual(t, originalAge, updatedUser.Age, "Age should be different from original")
+}

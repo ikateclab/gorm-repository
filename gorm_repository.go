@@ -221,6 +221,31 @@ func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID,
 	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
+func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity T, updateFunc func(), options ...Option) error {
+	db := applyOptions(r.DB, options).WithContext(ctx)
+
+	diffable, isDiffable := any(entity).(Diffable[T])
+	if !isDiffable {
+		return fmt.Errorf("entity does not support diffing - entity must implement Diffable[T] interface")
+	}
+
+	// Clone the original entity to use for diff generation
+	originalClone := diffable.Clone()
+
+	// Apply the update function to modify the entity in place
+	updateFunc()
+
+	diff := diffable.Diff(originalClone)
+
+	if len(diff) == 0 {
+		// No changes, nothing to update
+		return nil
+	}
+
+	// Perform the update using the diff - GORM will extract the primary key from the entity
+	return db.Model(&entity).Clauses(clause.Returning{}).Updates(diff).Error
+}
+
 func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	return db.Delete(new(T), "id = ?", id).Error
