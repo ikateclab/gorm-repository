@@ -347,6 +347,144 @@ func TestGormRepository_Transaction_Finish_Error(t *testing.T) {
 	// The actual rollback happens in defer
 }
 
+func TestGormRepository_UpdateById_WithoutTransaction(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Modify the user
+	user.Name = "Updated Without Transaction"
+	user.Age = 35
+
+	// Update without transaction - should work with blank clone
+	err = repo.UpdateById(ctx, user.ID, user)
+	require.NoError(t, err, "UpdateById without transaction should not fail")
+
+	// Verify the update
+	updatedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.Equal(t, "Updated Without Transaction", updatedUser.Name, "Expected updated name")
+	require.Equal(t, 35, updatedUser.Age, "Expected updated age")
+}
+
+func TestGormRepository_UpdateById_WithTransactionAndClone(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Start transaction and find user (this creates a clone)
+	tx := repo.BeginTransaction()
+
+	foundUser, err := repo.FindById(ctx, user.ID, WithTx(tx))
+	require.NoError(t, err, "Failed to find user in transaction")
+
+	// Modify the user
+	foundUser.Name = "Updated With Transaction"
+	foundUser.Age = 40
+
+	// Update with transaction and existing clone
+	err = repo.UpdateById(ctx, user.ID, foundUser, WithTx(tx))
+	require.NoError(t, err, "UpdateById with transaction should not fail")
+
+	// Commit the transaction
+	err = tx.Commit()
+	require.NoError(t, err, "Failed to commit transaction")
+
+	// Verify the update
+	updatedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.Equal(t, "Updated With Transaction", updatedUser.Name, "Expected updated name")
+	require.Equal(t, 40, updatedUser.Age, "Expected updated age")
+}
+
+func TestGormRepository_UpdateById_WithTransactionNoClone(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Start transaction but don't find user (no clone created)
+	tx := repo.BeginTransaction()
+
+	// Modify the user
+	user.Name = "Updated With Transaction No Clone"
+	user.Age = 45
+
+	// Update with transaction but no existing clone - should work with blank clone
+	err = repo.UpdateById(ctx, user.ID, user, WithTx(tx))
+	require.NoError(t, err, "UpdateById with transaction but no clone should not fail")
+
+	// Commit the transaction
+	err = tx.Commit()
+	require.NoError(t, err, "Failed to commit transaction")
+
+	// Verify the update
+	updatedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.Equal(t, "Updated With Transaction No Clone", updatedUser.Name, "Expected updated name")
+	require.Equal(t, 45, updatedUser.Age, "Expected updated age")
+}
+
+func TestGormRepository_UpdateById_NoChanges(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[*tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	originalName := user.Name
+	originalAge := user.Age
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Don't modify the user - should result in no changes
+	err = repo.UpdateById(ctx, user.ID, user)
+	require.NoError(t, err, "UpdateById with no changes should not fail")
+
+	// Verify no changes were made
+	unchangedUser, err := repo.FindById(ctx, user.ID)
+	require.NoError(t, err, "Failed to find user")
+
+	require.Equal(t, originalName, unchangedUser.Name, "Name should remain unchanged")
+	require.Equal(t, originalAge, unchangedUser.Age, "Age should remain unchanged")
+}
+
+func TestGormRepository_UpdateById_NonDiffableEntity(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Create a repository for a type that doesn't implement Diffable
+	type NonDiffableEntity struct {
+		ID   uuid.UUID `gorm:"type:text;primary_key"`
+		Name string
+	}
+
+	repo := &GormRepository[NonDiffableEntity]{DB: db}
+
+	entity := NonDiffableEntity{
+		ID:   uuid.New(),
+		Name: "Test",
+	}
+
+	// This should fail because NonDiffableEntity doesn't implement Diffable
+	err := repo.UpdateById(ctx, entity.ID, entity)
+	require.Error(t, err, "UpdateById should fail for non-diffable entity")
+	require.Contains(t, err.Error(), "entity must implement Diffable[T] interface", "Error should mention Diffable requirement")
+}
+
 func TestGormRepository_UpdateByIdWithMap(t *testing.T) {
 	db := setupTestDB(t)
 	repo := &GormRepository[*tests.TestUser]{DB: db}

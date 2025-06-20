@@ -157,36 +157,44 @@ func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID
 	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(updateMap).Error
 }
 
-func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error {
-	db := applyOptions(r.DB, options).WithContext(ctx)
-
-	// Get transaction context
+// getCloneForDiff attempts to get an existing clone from transaction context,
+// falling back to a blank entity if no clone is available
+func getCloneForDiff[T any](db *gorm.DB, entity T) T {
+	// Try to get transaction context
 	txInterface, exists := db.Get(txContextKey)
 	if !exists {
-		return fmt.Errorf("UpdateById requires a transaction context - use WithTx option")
+		return newEntity[T]()
 	}
 
 	tx, ok := txInterface.(*Tx)
 	if !ok {
-		return fmt.Errorf("invalid transaction context")
+		return newEntity[T]()
 	}
 
-	// Get cloned entity
+	// Try to get cloned entity from transaction
 	cloneInterface, found := tx.getClonedEntity(generateEntityKey(entity))
 	if !found {
-		return fmt.Errorf("entity not cloned in transaction - use FindById/FindOne with WithTx first")
+		return newEntity[T]()
 	}
 
 	clone, ok := cloneInterface.(T)
 	if !ok {
-		return fmt.Errorf("cloned entity type mismatch")
+		return newEntity[T]()
 	}
+
+	return clone
+}
+
+func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error {
+	db := applyOptions(r.DB, options).WithContext(ctx)
 
 	// Generate diff
 	diffable, ok := any(entity).(Diffable[T])
 	if !ok {
 		return fmt.Errorf("entity must implement Diffable[T] interface")
 	}
+
+	clone := getCloneForDiff(db, entity)
 
 	diff := diffable.Diff(clone)
 	if len(diff) == 0 {
