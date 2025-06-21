@@ -36,8 +36,8 @@ func TestIntegration_CompleteUserWorkflow(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a user
-	user := tests.TestUser{
-		ID:     uuid.New(),
+	user := &tests.TestUser{
+		Id:     uuid.New(),
 		Name:   "Integration Test User",
 		Email:  "integration@example.com",
 		Age:    28,
@@ -50,9 +50,9 @@ func TestIntegration_CompleteUserWorkflow(t *testing.T) {
 	}
 
 	// Create a profile for the user
-	profile := tests.TestProfile{
-		ID:       uuid.New(),
-		UserID:   user.ID,
+	profile := &tests.TestProfile{
+		Id:       uuid.New(),
+		UserId:   user.Id,
 		Bio:      "Integration test bio",
 		Website:  "https://integration.example.com",
 		Settings: `{"theme":"dark","language":"en"}`,
@@ -64,7 +64,7 @@ func TestIntegration_CompleteUserWorkflow(t *testing.T) {
 	}
 
 	// Find user with profile preloaded
-	foundUser, err := userRepo.FindById(ctx, user.ID, WithRelations("Profile"))
+	foundUser, err := userRepo.FindById(ctx, user.Id, WithRelations("Profile"))
 	if err != nil {
 		t.Fatalf("Failed to find user with profile: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestIntegration_CompleteUserWorkflow(t *testing.T) {
 	}
 
 	// Verify update
-	updatedUser, err := userRepo.FindById(ctx, user.ID)
+	updatedUser, err := userRepo.FindById(ctx, user.Id)
 	if err != nil {
 		t.Fatalf("Failed to find updated user: %v", err)
 	}
@@ -116,16 +116,16 @@ func TestIntegration_TransactionWorkflow(t *testing.T) {
 		tx := userRepo.BeginTransaction()
 		defer tx.Finish(&err)
 
-		user1 := tests.TestUser{
-			ID:     uuid.New(),
+		user1 := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   "Transaction User 1",
 			Email:  "tx1@example.com",
 			Age:    25,
 			Active: true,
 		}
 
-		user2 := tests.TestUser{
-			ID:     uuid.New(),
+		user2 := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   "Transaction User 2",
 			Email:  "tx2@example.com",
 			Age:    30,
@@ -165,8 +165,8 @@ func TestIntegration_TransactionWorkflow(t *testing.T) {
 		tx := userRepo.BeginTransaction()
 		defer tx.Finish(&err)
 
-		user3 := tests.TestUser{
-			ID:     uuid.New(),
+		user3 := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   "Transaction User 3",
 			Email:  "tx3@example.com",
 			Age:    35,
@@ -200,8 +200,8 @@ func TestIntegration_PaginationWithLargeDataset(t *testing.T) {
 
 	// Create 25 test users
 	for i := 0; i < 25; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   "Pagination User " + string(rune(i+'1')),
 			Email:  "pagination" + string(rune(i+'1')) + "@example.com",
 			Age:    20 + i,
@@ -270,51 +270,51 @@ func TestIntegration_AssociationManagement(t *testing.T) {
 
 	// Create user
 	user := tests.TestUser{
-		ID:     uuid.New(),
+		Id:     uuid.New(),
 		Name:   "Association Test User",
 		Email:  "associations@example.com",
 		Age:    30,
 		Active: true,
 	}
-	err := userRepo.Create(ctx, user)
+	err := userRepo.Create(ctx, &user)
 	if err != nil {
 		t.Fatalf("Failed to create user: %v", err)
 	}
 
 	// Create tags
-	tag1 := tests.TestTag{ID: uuid.New(), Name: "Go"}
-	tag2 := tests.TestTag{ID: uuid.New(), Name: "Testing"}
+	tag1 := tests.TestTag{Id: uuid.New(), Name: "Go"}
+	tag2 := tests.TestTag{Id: uuid.New(), Name: "Testing"}
 
-	err = tagRepo.Create(ctx, tag1)
+	err = tagRepo.Create(ctx, &tag1)
 	if err != nil {
 		t.Fatalf("Failed to create tag1: %v", err)
 	}
-	err = tagRepo.Create(ctx, tag2)
+	err = tagRepo.Create(ctx, &tag2)
 	if err != nil {
 		t.Fatalf("Failed to create tag2: %v", err)
 	}
 
 	// Create post
 	post := tests.TestPost{
-		ID:        uuid.New(),
-		UserID:    user.ID,
+		Id:        uuid.New(),
+		UserId:    user.Id,
 		Title:     "Test Post",
 		Content:   "This is a test post content",
 		Published: true,
 	}
-	err = postRepo.Create(ctx, post)
+	err = postRepo.Create(ctx, &post)
 	if err != nil {
 		t.Fatalf("Failed to create post: %v", err)
 	}
 
 	// Test association append
-	err = postRepo.AppendAssociation(ctx, post, "Tags", []tests.TestTag{tag1, tag2})
+	err = postRepo.AppendAssociation(ctx, &post, "Tags", []tests.TestTag{tag1, tag2})
 	if err != nil {
 		t.Fatalf("Failed to append tags to post: %v", err)
 	}
 
 	// Verify associations were created
-	foundPost, err := postRepo.FindById(ctx, post.ID, WithRelations("Tags"))
+	foundPost, err := postRepo.FindById(ctx, post.Id, WithRelations("Tags"))
 	if err != nil {
 		t.Fatalf("Failed to find post with tags: %v", err)
 	}

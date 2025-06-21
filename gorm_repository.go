@@ -57,18 +57,19 @@ func newEntity[T any]() T {
 	return entity
 }
 
-func (r *GormRepository[T]) FindMany(ctx context.Context, options ...Option) ([]T, error) {
-	var entities []T
+func (r *GormRepository[T]) FindMany(ctx context.Context, options ...Option) ([]*T, error) {
+	var entities []*T
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	if err := db.Find(&entities).Error; err != nil {
 		return nil, err
 	}
+
 	return entities, nil
 }
 
 // FindPaginated retrieves records with pagination.
-func (r *GormRepository[T]) FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[T], error) {
-	var entities []T
+func (r *GormRepository[T]) FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[*T], error) {
+	var entities []*T
 	var totalRows int64
 
 	db := applyOptions(r.DB, options).WithContext(ctx)
@@ -79,7 +80,7 @@ func (r *GormRepository[T]) FindPaginated(ctx context.Context, page int, pageSiz
 		return nil, err
 	}
 
-	result := &PaginationResult[T]{
+	result := &PaginationResult[*T]{
 		Data:        entities,
 		Total:       totalRows,
 		Limit:       pageSize,
@@ -93,36 +94,36 @@ func (r *GormRepository[T]) FindPaginated(ctx context.Context, page int, pageSiz
 	return result, nil
 }
 
-func (r *GormRepository[T]) FindOne(ctx context.Context, options ...Option) (T, error) {
-	var entity T
+func (r *GormRepository[T]) FindOne(ctx context.Context, options ...Option) (*T, error) {
+	entity := newEntity[T]()
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
 	if err := db.First(&entity).Error; err != nil {
-		return entity, err
+		return nil, err
 	}
 
 	// Store clone if in transaction and supports cloning
 	storeCloneIfInTransaction(db, entity)
 
-	return entity, nil
+	return &entity, nil
 }
 
-func (r *GormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options ...Option) (T, error) {
-	var entity T
+func (r *GormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options ...Option) (*T, error) {
+	entity := newEntity[T]()
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	if err := db.First(&entity, "id = ?", id).Error; err != nil {
-		return entity, err
+		return nil, err
 	}
 
 	// Store clone if in transaction and supports cloning
 	storeCloneIfInTransaction(db, entity)
 
-	return entity, nil
+	return &entity, nil
 }
 
-func (r *GormRepository[T]) Create(ctx context.Context, entity T, options ...Option) error {
+func (r *GormRepository[T]) Create(ctx context.Context, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
-	if err := db.Create(&entity).Error; err != nil {
+	if err := db.Create(entity).Error; err != nil {
 		return err
 	}
 
@@ -131,22 +132,22 @@ func (r *GormRepository[T]) Create(ctx context.Context, entity T, options ...Opt
 	return nil
 }
 
-func (r *GormRepository[T]) Save(ctx context.Context, entity T, options ...Option) error {
+func (r *GormRepository[T]) Save(ctx context.Context, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
-	return db.Save(&entity).Error
+	return db.Save(entity).Error
 }
 
-func (r *GormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (T, error) {
+func (r *GormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (*T, error) {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	entity := newEntity[T]()
 
 	if err := db.Model(&entity).Where("id = ?", id).Updates(values).Error; err != nil {
-		return entity, err
+		return nil, err
 	}
-	return entity, nil
+	return &entity, nil
 }
 
-func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity T, options ...Option) error {
+func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
 	updateMap, err := utils.EntityToMap(mask, entity)
@@ -154,7 +155,7 @@ func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID
 		return err
 	}
 
-	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(updateMap).Error
+	return db.Model(entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(updateMap).Error
 }
 
 // getCloneForDiff attempts to get an existing clone from transaction context,
@@ -185,7 +186,7 @@ func getCloneForDiff[T any](db *gorm.DB, entity T) T {
 	return clone
 }
 
-func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error {
+func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
 	// Generate diff
@@ -201,10 +202,10 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 		return nil // No changes
 	}
 
-	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	return db.Model(entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
-func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(), options ...Option) error {
+func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity *T, updateFunc func(), options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
 	diffable, isDiffable := any(entity).(Diffable[T])
@@ -226,10 +227,10 @@ func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID,
 	}
 
 	// Perform the update using the diff and return the updated entity
-	return db.Model(&entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	return db.Model(entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
-func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity T, updateFunc func(), options ...Option) error {
+func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, updateFunc func(), options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 
 	diffable, isDiffable := any(entity).(Diffable[T])
@@ -251,7 +252,7 @@ func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity T, updateF
 	}
 
 	// Perform the update using the diff - GORM will extract the primary key from the entity
-	return db.Model(&entity).Clauses(clause.Returning{}).Updates(diff).Error
+	return db.Model(entity).Clauses(clause.Returning{}).Updates(diff).Error
 }
 
 func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error {
@@ -259,27 +260,27 @@ func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, option
 	return db.Delete(new(T), "id = ?", id).Error
 }
 
-func (r *GormRepository[T]) AppendAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error {
+func (r *GormRepository[T]) AppendAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error {
 	return applyOptions(r.DB, options).
 		WithContext(ctx).
-		Model(&entity).
+		Model(entity).
 		Omit(association + ".*"). // https://gorm.io/docs/associations.html#Using-Omit-to-Exclude-Fields-or-Associations
 		Association(association).
 		Append(values)
 }
 
-func (r *GormRepository[T]) RemoveAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error {
+func (r *GormRepository[T]) RemoveAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error {
 	return applyOptions(r.DB, options).
 		WithContext(ctx).
-		Model(&entity).
+		Model(entity).
 		Association(association).
 		Delete(values)
 }
 
-func (r *GormRepository[T]) ReplaceAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error {
+func (r *GormRepository[T]) ReplaceAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error {
 	return applyOptions(r.DB, options).
 		WithContext(ctx).
-		Model(&entity).
+		Model(entity).
 		Omit(association + ".*").
 		Association(association).
 		Replace(values)
@@ -412,14 +413,14 @@ func (tx *Tx) getClonedEntity(entityKey string) (interface{}, bool) {
 	return original, exists
 }
 
-// generateEntityKey creates a unique key for an entity based on its type and ID
+// generateEntityKey creates a unique key for an entity based on its type and Id
 func generateEntityKey(entity interface{}) string {
 	entityType := reflect.TypeOf(entity)
 	if entityType.Kind() == reflect.Ptr {
 		entityType = entityType.Elem()
 	}
 
-	// Try to get ID field using reflection
+	// Try to get Id field using reflection
 	entityValue := reflect.ValueOf(entity)
 	if entityValue.Kind() == reflect.Ptr {
 		entityValue = entityValue.Elem()
@@ -427,7 +428,7 @@ func generateEntityKey(entity interface{}) string {
 
 	idField := entityValue.FieldByName("Id")
 	if !idField.IsValid() {
-		// Fallback to memory address if no ID field
+		// Fallback to memory address if no Id field
 		return fmt.Sprintf("%s_%p", entityType.Name(), entity)
 	}
 

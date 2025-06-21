@@ -57,10 +57,10 @@ func TestCamelCaseNamingStrategy_ColumnName(t *testing.T) {
 	}{
 		{"users", "FirstName", "firstName"},
 		{"users", "LastName", "lastName"},
-		{"users", "ID", "id"},
+		{"users", "Id", "id"},
 		{"users", "CreatedAt", "createdAt"},
 		{"users", "UpdatedAt", "updatedAt"},
-		{"users", "UserID", "userID"},
+		{"users", "UserId", "userId"},
 		{"users", "XMLData", "xmldata"},
 		{"users", "HTTPStatus", "httpstatus"},
 		{"users", "name", "name"},
@@ -103,7 +103,7 @@ func TestCamelCaseNamingStrategy_RelationshipFKName(t *testing.T) {
 	rel := schema.Relationship{
 		Name: "User",
 		Field: &schema.Field{
-			Name: "ID",
+			Name: "Id",
 		},
 	}
 
@@ -184,12 +184,12 @@ func TestToLowerCamelCase(t *testing.T) {
 	}{
 		{"FirstName", "firstName"},
 		{"LastName", "lastName"},
-		{"ID", "id"},
+		{"Id", "id"},
 		{"XMLData", "xmldata"},
 		{"HTTPStatus", "httpstatus"},
 		{"CreatedAt", "createdAt"},
 		{"UpdatedAt", "updatedAt"},
-		{"UserID", "userID"},
+		{"UserId", "userId"},
 		{"name", "name"},
 		{"email", "email"},
 		{"", ""},
