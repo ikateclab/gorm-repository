@@ -123,7 +123,7 @@ func (r *GormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options 
 
 func (r *GormRepository[T]) Create(ctx context.Context, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
-	if err := db.Create(entity).Error; err != nil {
+	if err := db.Omit(clause.Associations).Create(entity).Error; err != nil {
 		return err
 	}
 
@@ -134,14 +134,14 @@ func (r *GormRepository[T]) Create(ctx context.Context, entity *T, options ...Op
 
 func (r *GormRepository[T]) Save(ctx context.Context, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
-	return db.Save(entity).Error
+	return db.Omit(clause.Associations).Save(entity).Error
 }
 
 func (r *GormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (*T, error) {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	entity := newEntity[T]()
 
-	if err := db.Model(&entity).Where("id = ?", id).Updates(values).Error; err != nil {
+	if err := db.Model(&entity).Omit(clause.Associations).Where("id = ?", id).Updates(values).Error; err != nil {
 		return nil, err
 	}
 	return &entity, nil
@@ -155,7 +155,7 @@ func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID
 		return err
 	}
 
-	return db.Model(entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(updateMap).Error
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(updateMap).Error
 }
 
 // getCloneForDiff attempts to get an existing clone from transaction context,
@@ -202,7 +202,7 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 		return nil // No changes
 	}
 
-	return db.Model(entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
 func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity *T, updateFunc func(), options ...Option) error {
@@ -227,7 +227,7 @@ func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID,
 	}
 
 	// Perform the update using the diff and return the updated entity
-	return db.Model(entity).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
 }
 
 func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, updateFunc func(), options ...Option) error {
@@ -252,7 +252,7 @@ func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, update
 	}
 
 	// Perform the update using the diff - GORM will extract the primary key from the entity
-	return db.Model(entity).Clauses(clause.Returning{}).Updates(diff).Error
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Updates(diff).Error
 }
 
 func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error {
