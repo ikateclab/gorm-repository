@@ -268,20 +268,17 @@ func TestGormRepository_Transaction_Commit(t *testing.T) {
 	repo := &GormRepository[*tests.TestUser]{DB: db}
 	ctx := context.Background()
 
+	var txErr error
 	tx := repo.BeginTransaction()
-	defer func() {
-		if !tx.committed && !tx.rolledBack {
-			tx.Rollback()
-		}
-	}()
+	defer tx.Finish(&txErr)
 
 	user := createTestUser()
-	err := repo.Create(ctx, user, WithTx(tx))
-	require.NoError(t, err, "Create in transaction should not fail")
+	txErr = repo.Create(ctx, user, WithTx(tx))
+	require.NoError(t, txErr, "Create in transaction should not fail")
 
-	// Commit the transaction
-	err = tx.Commit()
-	require.NoError(t, err, "Transaction commit should not fail")
+	// Commit the transaction explicitly (since we want to control the flow)
+	txErr = tx.Commit()
+	require.NoError(t, txErr, "Transaction commit should not fail")
 
 	// Verify the user was created
 	var count int64
