@@ -2,18 +2,19 @@ package tests
 
 import (
 	"context"
-	gr "github.com/ikateclab/gorm-repository"
 	"testing"
+
+	gr "github.com/ikateclab/gorm-repository"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 // CreateTestUsers creates multiple test users in the database
-func CreateTestUsers(t *testing.T, repo *gr.GormRepository[TestUser], count int) []TestUser {
+func CreateTestUsers(t *testing.T, repo *gr.GormRepository[TestUser], count int) []*TestUser {
 	t.Helper()
 	ctx := context.Background()
-	users := make([]TestUser, count)
+	users := make([]*TestUser, count)
 
 	for i := 0; i < count; i++ {
 		user := NewTestUserBuilder().
@@ -34,7 +35,7 @@ func CreateTestUsers(t *testing.T, repo *gr.GormRepository[TestUser], count int)
 }
 
 // AssertPaginationResult validates pagination result structure
-func AssertPaginationResult(t *testing.T, result *gr.PaginationResult[TestUser], expectedTotal int64, expectedPage int, expectedPageSize int, message string) {
+func AssertPaginationResult(t *testing.T, result *gr.PaginationResult[*TestUser], expectedTotal int64, expectedPage int, expectedPageSize int, message string) {
 	t.Helper()
 
 	if result.Total != expectedTotal {
@@ -77,12 +78,12 @@ func TestSuite_UsingHelpers(t *testing.T) {
 			t.Errorf("Failed to create user with builder: %v", err)
 		}
 
-		foundUser, err := repo.FindById(ctx, user.ID)
+		foundUser, err := repo.FindById(ctx, user.Id)
 		if err != nil {
 			t.Errorf("Failed to find created user: %v", err)
 		}
 
-		AssertUserEqual(t, user, foundUser, "Builder created user")
+		AssertUserEqual(t, *user, *foundUser, "Builder created user")
 	})
 
 	t.Run("CreateMultipleUsers", func(t *testing.T) {
@@ -134,7 +135,7 @@ func TestSuite_ProfileIntegration(t *testing.T) {
 			t.Fatalf("Failed to create user: %v", err)
 		}
 
-		profile := NewTestProfileBuilder(user.ID).
+		profile := NewTestProfileBuilder(user.Id).
 			WithBio("Test bio for profile integration").
 			WithWebsite("https://profile.example.com").
 			WithSettings(`{"theme":"dark","language":"en","notifications":{"email":true,"push":false}}`).
@@ -146,7 +147,7 @@ func TestSuite_ProfileIntegration(t *testing.T) {
 		}
 
 		// Find user with profile
-		foundUser, err := userRepo.FindById(ctx, user.ID, gr.WithRelations("Profile"))
+		foundUser, err := userRepo.FindById(ctx, user.Id, gr.WithRelations("Profile"))
 		if err != nil {
 			t.Fatalf("Failed to find user with profile: %v", err)
 		}
@@ -184,11 +185,11 @@ func TestSuite_PostsAndTags(t *testing.T) {
 		}
 
 		// Create tags
-		tag1 := TestTag{ID: uuid.New(), Name: "Go"}
-		tag2 := TestTag{ID: uuid.New(), Name: "Testing"}
-		tag3 := TestTag{ID: uuid.New(), Name: "GORM"}
+		tag1 := &TestTag{Id: uuid.New(), Name: "Go"}
+		tag2 := &TestTag{Id: uuid.New(), Name: "Testing"}
+		tag3 := &TestTag{Id: uuid.New(), Name: "GORM"}
 
-		for _, tag := range []TestTag{tag1, tag2, tag3} {
+		for _, tag := range []*TestTag{tag1, tag2, tag3} {
 			err = tagRepo.Create(ctx, tag)
 			if err != nil {
 				t.Fatalf("Failed to create tag %s: %v", tag.Name, err)
@@ -196,13 +197,13 @@ func TestSuite_PostsAndTags(t *testing.T) {
 		}
 
 		// Create posts
-		post1 := NewTestPostBuilder(user.ID).
+		post1 := NewTestPostBuilder(user.Id).
 			WithTitle("Introduction to Go").
 			WithContent("Go is a great programming language...").
 			WithPublished(true).
 			Build()
 
-		post2 := NewTestPostBuilder(user.ID).
+		post2 := NewTestPostBuilder(user.Id).
 			WithTitle("Testing with GORM").
 			WithContent("GORM makes database testing easier...").
 			WithPublished(false).
@@ -218,18 +219,18 @@ func TestSuite_PostsAndTags(t *testing.T) {
 		}
 
 		// Associate tags with posts
-		err = postRepo.AppendAssociation(ctx, post1, "Tags", []TestTag{tag1, tag2})
+		err = postRepo.AppendAssociation(ctx, post1, "Tags", []*TestTag{tag1, tag2})
 		if err != nil {
 			t.Fatalf("Failed to associate tags with post1: %v", err)
 		}
 
-		err = postRepo.AppendAssociation(ctx, post2, "Tags", []TestTag{tag2, tag3})
+		err = postRepo.AppendAssociation(ctx, post2, "Tags", []*TestTag{tag2, tag3})
 		if err != nil {
 			t.Fatalf("Failed to associate tags with post2: %v", err)
 		}
 
 		// Find user with posts and their tags
-		foundUser, err := userRepo.FindById(ctx, user.ID, gr.WithRelations("Posts", "Posts.Tags"))
+		foundUser, err := userRepo.FindById(ctx, user.Id, gr.WithRelations("Posts", "Posts.Tags"))
 		if err != nil {
 			t.Fatalf("Failed to find user with posts and tags: %v", err)
 		}
@@ -248,7 +249,7 @@ func TestSuite_PostsAndTags(t *testing.T) {
 		// Find published posts only
 		publishedPosts, err := postRepo.FindMany(ctx,
 			gr.WithQuery(func(db *gorm.DB) *gorm.DB {
-				return db.Where("user_id = ? AND published = ?", user.ID, true)
+				return db.Where("user_id = ? AND published = ?", user.Id, true)
 			}),
 			gr.WithRelations("Tags"),
 		)
@@ -291,7 +292,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 		}
 
 		// Create profile in transaction
-		profile := NewTestProfileBuilder(user.ID).
+		profile := NewTestProfileBuilder(user.Id).
 			WithBio("Transaction profile bio").
 			Build()
 
@@ -316,7 +317,7 @@ func TestSuite_TransactionScenarios(t *testing.T) {
 	}
 
 	profiles, err := profileRepo.FindMany(ctx, gr.WithQuery(func(db *gorm.DB) *gorm.DB {
-		return db.Where("user_id = ?", users[0].ID)
+		return db.Where("user_id = ?", users[0].Id)
 	}))
 	if err != nil {
 		t.Fatalf("Failed to find transaction profile: %v", err)

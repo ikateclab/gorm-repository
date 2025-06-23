@@ -32,11 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FindOne()` - Find single entity
 - `Create()` - Create new entity
 - `Save()` - Save entity (create or update)
-- `UpdateById()` - Update entity by ID with diff support
+- `UpdateById()` - Update entity by Id with diff support
 - `UpdateByIdWithMask()` - Update with field mask
 - `UpdateByIdWithMap()` - Update with map values
 - `UpdateByIdInPlace()` - Update with callback function
-- `DeleteById()` - Delete entity by ID
+- `DeleteById()` - Delete entity by Id
 - `BeginTransaction()` - Start transaction
 - `AppendAssociation()` - Add associations
 - `RemoveAssociation()` - Remove associations
