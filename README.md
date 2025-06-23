@@ -1,3 +1,8 @@
+# WIP ⚠️ 
+
+This package is a Work In Progress and production use is not recommended
+
+
 # GORM Repository
 
 A generic repository pattern implementation for GORM with advanced features including transaction management, entity diffing, and pagination.
