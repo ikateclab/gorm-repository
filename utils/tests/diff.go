@@ -2,7 +2,18 @@ package tests
 
 import (
 	"reflect"
+	"strings"
+
+	"github.com/bytedance/sonic"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// isEmptyJSON checks if a JSON string represents an empty object or array
+func isEmptyJSON(jsonStr string) bool {
+	trimmed := strings.TrimSpace(jsonStr)
+	return trimmed == "{}" || trimmed == "[]" || trimmed == "null"
+}
 
 // Diff compares this TestDBConfig instance (new) with another (old) and returns a map of differences
 // with only the new values for fields that have changed.
@@ -120,6 +131,42 @@ func (new *TestPostBuilder) Diff(old *TestPostBuilder) map[string]interface{} {
 	return diff
 }
 
+// Diff compares this UserData instance (new) with another (old) and returns a map of differences
+// with only the new values for fields that have changed.
+// Usage: newValues = new.Diff(old)
+// Returns nil if either pointer is nil.
+func (new *UserData) Diff(old *UserData) map[string]interface{} {
+	// Handle nil pointers
+	if new == nil || old == nil {
+		return nil
+	}
+
+	diff := make(map[string]interface{})
+
+	// Compare Day
+
+	// Simple type comparison
+	if new.Day != old.Day {
+		diff["day"] = new.Day
+	}
+
+	// Compare Nickname
+
+	// Simple type comparison
+	if new.Nickname != old.Nickname {
+		diff["nickname"] = new.Nickname
+	}
+
+	// Compare Married
+
+	// Simple type comparison
+	if new.Married != old.Married {
+		diff["married"] = new.Married
+	}
+
+	return diff
+}
+
 // Diff compares this TestUser instance (new) with another (old) and returns a map of differences
 // with only the new values for fields that have changed.
 // Usage: newValues = new.Diff(old)
@@ -188,6 +235,38 @@ func (new *TestUser) Diff(old *TestUser) map[string]interface{} {
 	// Complex type comparison (slice, map, interface, etc.)
 	if !reflect.DeepEqual(new.Posts, old.Posts) {
 		diff["posts"] = new.Posts
+	}
+
+	// Compare Data
+
+	// JSON field comparison - handle both datatypes.JSON and struct types with jsonb storage
+
+	// JSON field comparison - attribute-by-attribute diff for struct types
+
+	// Handle pointer to struct
+	if new.Data == nil && old.Data != nil {
+		// new is nil, old is not nil - set to null
+		diff["data"] = nil
+	} else if new.Data != nil && old.Data == nil {
+		// new is not nil, old is nil - use entire new
+		jsonValue, err := sonic.Marshal(new.Data)
+		if err == nil && !isEmptyJSON(string(jsonValue)) {
+			diff["data"] = gorm.Expr("? || ?", clause.Column{Name: "data"}, string(jsonValue))
+		} else if err != nil {
+			diff["data"] = new.Data
+		}
+	} else if new.Data != nil && old.Data != nil {
+		// Both are not nil - use attribute-by-attribute diff
+		DataDiff := new.Data.Diff(old.Data)
+		if len(DataDiff) > 0 {
+			jsonValue, err := sonic.Marshal(DataDiff)
+			if err == nil && !isEmptyJSON(string(jsonValue)) {
+				diff["data"] = gorm.Expr("? || ?", clause.Column{Name: "data"}, string(jsonValue))
+			} else if err != nil {
+				// Fallback to regular assignment if JSON marshaling fails
+				diff["data"] = new.Data
+			}
+		}
 	}
 
 	return diff

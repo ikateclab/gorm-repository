@@ -7,7 +7,14 @@ import (
 )
 
 /// go :  go run ../../../gorm-tracked-updates/cmd/gorm-gen/main.go -package=.
-//go:generate go run github.com/ikateclab/gorm-tracked-updates/cmd/gorm-gen@v0.0.4 -package=.
+//go:generate go run github.com/ikateclab/gorm-tracked-updates/cmd/gorm-gen@v0.0.5 -package=.
+
+// @jsonb
+type UserData struct {
+	Day      int    `json:"day,omitempty"`
+	Nickname string `json:"nickname,omitempty"`
+	Married  bool   `json:"married,omitempty"`
+}
 
 // TestUser represents a test entity for repository testing
 // @jsonb
@@ -19,6 +26,7 @@ type TestUser struct {
 	Active  bool         `json:"active"`
 	Profile *TestProfile `gorm:"foreignKey:UserId" json:"profile,omitempty"`
 	Posts   []*TestPost  `gorm:"foreignKey:UserId" json:"posts,omitempty"`
+	Data    *UserData    `gorm:"type:jsonb;serializer:json;not null;default:'{}'" json:"data,omitempty"`
 }
 
 // TestProfile represents a user profile for testing relationships
