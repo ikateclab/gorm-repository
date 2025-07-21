@@ -2,34 +2,44 @@ package gormrepository
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ikateclab/gorm-repository/utils/tests"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/sqlite"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// setupTestDB creates an in-memory SQLite database for testing
+var testDB *gorm.DB
+
+func truncateAllTables(db *gorm.DB) error {
+	tables := []string{
+		"test_users",
+		"test_profiles",
+		"test_posts",
+		"test_tags",
+		"test_simple_entities",
+	}
+	for _, table := range tables {
+		if err := db.Exec(fmt.Sprintf("TRUNCATE TABLE %s RESTART IDENTITY CASCADE", table)).Error; err != nil {
+			return fmt.Errorf("failed to truncate %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
 func setupTestDB(t *testing.T) *gorm.DB {
-	// Use a unique database name for each test to ensure isolation
-	dbName := ":memory:"
-	db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		t.Fatalf("Failed to connect to test database: %v", err)
-	}
-
-	// Auto-migrate test models
-	err = db.AutoMigrate(&tests.TestUser{}, &tests.TestProfile{}, &tests.TestPost{}, &tests.TestTag{}, &tests.TestSimpleEntity{})
-	if err != nil {
-		t.Fatalf("Failed to migrate test models: %v", err)
-	}
-
-	return db
+	err := truncateAllTables(testDB)
+	require.NoError(t, err, "failed to truncate tables before test")
+	return testDB
 }
 
 // createTestUser creates a test user for testing
@@ -40,6 +50,11 @@ func createTestUser() *tests.TestUser {
 		Email:  "john@example.com",
 		Age:    30,
 		Active: true,
+		Data: &tests.UserData{
+			Day:      10,
+			Nickname: "John",
+			Married:  true,
+		},
 	}
 }
 
@@ -359,6 +374,10 @@ func TestGormRepository_UpdateById_WithoutTransaction(t *testing.T) {
 	// Modify the user
 	user.Name = "Updated Without Transaction"
 	user.Age = 35
+	user.Active = false
+	user.Data.Day = 20
+	user.Data.Nickname = "Doe"
+	user.Data.Married = false
 
 	// Update without transaction - should work with blank clone
 	err = repo.UpdateById(ctx, user.Id, user)
@@ -370,6 +389,17 @@ func TestGormRepository_UpdateById_WithoutTransaction(t *testing.T) {
 
 	require.Equal(t, "Updated Without Transaction", updatedUser.Name, "Expected updated name")
 	require.Equal(t, 35, updatedUser.Age, "Expected updated age")
+
+	// Isso é esperado pois não estamos utilizando transaction, o diff só funciona com transaction, caso contrário é passado a entidade.
+	// Por padrão o gorm ignora o valor false para tipo booleano, não atualizando o campo.
+	require.True(t, updatedUser.Active, "Expected no update active")
+
+	require.Equal(t, "Doe", updatedUser.Data.Nickname, "Expected updated nickname")
+	require.Equal(t, 20, updatedUser.Data.Day, "Expected updated day")
+
+	// Isso é esperado pois não estamos utilizando transaction, o diff só funciona com transaction, caso contrário é passado a entidade.
+	// Por padrão o gorm ignora o valor false para tipo booleano, não atualizando o campo.
+	require.True(t, updatedUser.Data.Married, "Expected no update married")
 }
 
 func TestGormRepository_UpdateById_WithTransactionAndClone(t *testing.T) {
@@ -636,4 +666,66 @@ func TestGormRepository_UpdateInPlace_MultipleFields(t *testing.T) {
 	require.Equal(t, !originalActive, updatedUser.Active, "Active status should be toggled")
 	require.NotEqual(t, originalName, updatedUser.Name, "Name should be different from original")
 	require.NotEqual(t, originalAge, updatedUser.Age, "Age should be different from original")
+}
+
+func TestMain(m *testing.M) {
+	ctx := context.Background()
+
+	req := testcontainers.ContainerRequest{
+		Name:         "postgres-test",
+		Image:        "postgres:18beta1-alpine3.21",
+		ExposedPorts: []string{"5432/tcp"},
+		Env: map[string]string{
+			"POSTGRES_USER":     "postgres",
+			"POSTGRES_PASSWORD": "secret",
+			"POSTGRES_DB":       "testdb",
+		},
+		WaitingFor: wait.ForLog("database system is ready to accept connections").
+			WithStartupTimeout(30 * time.Second),
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+		Reuse:            true,
+	})
+	if err != nil {
+		log.Fatalf("failed to start container: %v", err)
+	}
+
+	host, _ := container.Host(ctx)
+	port, _ := container.MappedPort(ctx, "5432")
+
+	dsn := fmt.Sprintf("host=%s port=%s user=postgres password=secret dbname=testdb sslmode=disable", host, port.Port())
+
+	// Tenta conectar
+	for i := 0; i < 10; i++ {
+		testDB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+			Logger: logger.Default.LogMode(logger.Info),
+		})
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if err != nil {
+		log.Fatalf("failed to connect to DB: %v", err)
+	}
+
+	// Migração única
+	err = testDB.AutoMigrate(
+		&tests.TestUser{},
+		&tests.TestProfile{},
+		&tests.TestPost{},
+		&tests.TestTag{},
+		&tests.TestSimpleEntity{},
+	)
+	if err != nil {
+		log.Fatalf("auto-migrate failed: %v", err)
+	}
+
+	code := m.Run()
+
+	_ = container.Terminate(ctx)
+	os.Exit(code)
 }

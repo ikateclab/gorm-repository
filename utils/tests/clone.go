@@ -61,13 +61,30 @@ func (original *TestPostBuilder) Clone() *TestPostBuilder {
 	return &clone
 }
 
-// Clone creates a deep copy of the TestUser struct
-func (original *TestUser) Clone() *TestUser {
+// Clone creates a deep copy of the UserData struct
+func (original *UserData) Clone() *UserData {
 	if original == nil {
 		return nil
 	}
 	// Create new instance - all fields are simple types
 	clone := *original
+	return &clone
+}
+
+// Clone creates a deep copy of the TestUser struct
+func (original *TestUser) Clone() *TestUser {
+	if original == nil {
+		return nil
+	}
+	// Create new instance and copy all simple fields
+	clone := *original
+
+	// Only handle JSONB fields that need deep cloning
+
+	if original.Data != nil {
+		clone.Data = original.Data.Clone()
+	}
+
 	return &clone
 }
 
