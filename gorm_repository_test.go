@@ -44,12 +44,15 @@ func setupTestDB(t *testing.T) *gorm.DB {
 
 // createTestUser creates a test user for testing
 func createTestUser() *tests.TestUser {
+	now := time.Now()
+
 	return &tests.TestUser{
-		Id:     uuid.New(),
-		Name:   "John Doe",
-		Email:  "john@example.com",
-		Age:    30,
-		Active: true,
+		Id:         uuid.New(),
+		Name:       "John Doe",
+		Email:      "john@example.com",
+		Age:        30,
+		Active:     true,
+		ArchivedAt: &now,
 		Data: &tests.UserData{
 			Day:      10,
 			Nickname: "John",
@@ -421,6 +424,7 @@ func TestGormRepository_UpdateById_WithTransactionAndClone(t *testing.T) {
 	foundUser.Name = "Updated With Transaction"
 	foundUser.Age = 40
 	foundUser.Active = false
+	foundUser.ArchivedAt = nil
 	foundUser.Data.Day = 20
 	foundUser.Data.Nickname = "Doe"
 	foundUser.Data.Married = false
@@ -443,6 +447,7 @@ func TestGormRepository_UpdateById_WithTransactionAndClone(t *testing.T) {
 	require.Equal(t, 20, updatedUser.Data.Day, "Expected updated day")
 	require.Equal(t, "Doe", updatedUser.Data.Nickname, "Expected updated nickname")
 	require.False(t, updatedUser.Data.Married, "Expected updated Data.Married")
+	require.Nil(t, updatedUser.ArchivedAt, "Expected ArchivedAt to be nil")
 }
 
 func TestGormRepository_UpdateById_ZeroValue_WithTransaction(t *testing.T) {
@@ -464,6 +469,7 @@ func TestGormRepository_UpdateById_ZeroValue_WithTransaction(t *testing.T) {
 	foundUser.Name = ""
 	foundUser.Age = 0
 	foundUser.Active = false
+	foundUser.ArchivedAt = nil
 	foundUser.Data.Day = 0
 	foundUser.Data.Nickname = ""
 	foundUser.Data.Married = false
@@ -480,6 +486,7 @@ func TestGormRepository_UpdateById_ZeroValue_WithTransaction(t *testing.T) {
 	updatedUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "Failed to find updated user")
 
+	require.Nil(t, updatedUser.ArchivedAt, "Expected ArchivedAt to be nil")
 	require.Equal(t, "", updatedUser.Name, "Expected updated name")
 	require.Equal(t, 0, updatedUser.Age, "Expected updated age")
 	require.False(t, updatedUser.Active, "Expected updated active")
@@ -740,6 +747,7 @@ func TestGormRepository_UpdateByIdInPlace_ZeroValue_WithTransaction(t *testing.T
 		user.Name = ""
 		user.Active = false
 		user.Age = 0
+		user.ArchivedAt = nil
 		user.Data.Married = false
 		user.Data.Day = 0
 		user.Data.Nickname = ""
@@ -754,6 +762,7 @@ func TestGormRepository_UpdateByIdInPlace_ZeroValue_WithTransaction(t *testing.T
 	updatedUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "Failed to find updated user")
 
+	require.Nil(t, updatedUser.ArchivedAt, "Expected ArchivedAt to be nil")
 	require.False(t, updatedUser.Active, "Expected Active to be false")
 	require.False(t, updatedUser.Data.Married, "Expected Data.Married to be false")
 	require.Equal(t, 0, updatedUser.Data.Day, "Expected Data.Day to be 0")

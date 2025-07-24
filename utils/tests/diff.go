@@ -1,12 +1,12 @@
 package tests
 
 import (
-	"reflect"
-	"strings"
-
+	"bytes"
 	"github.com/bytedance/sonic"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"reflect"
+	"strings"
 )
 
 // isEmptyJSON checks if a JSON string represents an empty object or array
@@ -214,6 +214,15 @@ func (new *TestUser) Diff(old *TestUser) map[string]interface{} {
 	// Simple type comparison
 	if new.Active != old.Active {
 		diff["active"] = new.Active
+	}
+
+	// Compare ArchivedAt
+
+	// Time comparison
+
+	// Pointer to time comparison
+	if (new.ArchivedAt == nil) != (old.ArchivedAt == nil) || (new.ArchivedAt != nil && !new.ArchivedAt.Equal(*old.ArchivedAt)) {
+		diff["archivedAt"] = new.ArchivedAt
 	}
 
 	// Compare Profile

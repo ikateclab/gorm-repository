@@ -19,14 +19,15 @@ type UserData struct {
 // TestUser represents a test entity for repository testing
 // @jsonb
 type TestUser struct {
-	Id      uuid.UUID    `gorm:"type:text;primary_key" json:"id"`
-	Name    string       `gorm:"not null" json:"name"`
-	Email   string       `gorm:"unique;not null" json:"email"`
-	Age     int          `json:"age"`
-	Active  bool         `json:"active"`
-	Profile *TestProfile `gorm:"foreignKey:UserId" json:"profile,omitempty"`
-	Posts   []*TestPost  `gorm:"foreignKey:UserId" json:"posts,omitempty"`
-	Data    *UserData    `gorm:"type:jsonb;serializer:json;not null;default:'{}'" json:"data,omitempty"`
+	Id         uuid.UUID    `gorm:"type:text;primary_key" json:"id"`
+	Name       string       `gorm:"not null" json:"name"`
+	Email      string       `gorm:"unique;not null" json:"email"`
+	Age        int          `json:"age"`
+	Active     bool         `json:"active"`
+	ArchivedAt *time.Time   `gorm:"column:archivedAt;type:timestamptz" json:"archivedAt,omitempty"`
+	Profile    *TestProfile `gorm:"foreignKey:UserId" json:"profile,omitempty"`
+	Posts      []*TestPost  `gorm:"foreignKey:UserId" json:"posts,omitempty"`
+	Data       *UserData    `gorm:"type:jsonb;serializer:json;not null;default:'{}'" json:"data,omitempty"`
 }
 
 // TestProfile represents a user profile for testing relationships
