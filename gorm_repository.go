@@ -103,7 +103,7 @@ func (r *GormRepository[T]) FindOne(ctx context.Context, options ...Option) (*T,
 	}
 
 	// Store clone if in transaction and supports cloning
-	storeCloneIfInTransaction(db, entity)
+	storeCloneIfInTransaction(db, &entity)
 
 	return &entity, nil
 }
@@ -116,7 +116,7 @@ func (r *GormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options 
 	}
 
 	// Store clone if in transaction and supports cloning
-	storeCloneIfInTransaction(db, entity)
+	storeCloneIfInTransaction(db, &entity)
 
 	return &entity, nil
 }
@@ -160,27 +160,33 @@ func (r *GormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID
 
 // getCloneForDiff attempts to get an existing clone from transaction context,
 // falling back to a blank entity if no clone is available
-func getCloneForDiff[T any](db *gorm.DB, entity T) T {
+func getCloneForDiff[T any](db *gorm.DB, entity *T) *T {
 	// Try to get transaction context
 	txInterface, exists := db.Get(txContextKey)
 	if !exists {
-		return newEntity[T]()
+		entityBlank := newEntity[T]()
+		return &entityBlank
 	}
 
 	tx, ok := txInterface.(*Tx)
 	if !ok {
-		return newEntity[T]()
+		entityBlank := newEntity[T]()
+		return &entityBlank
 	}
 
 	// Try to get cloned entity from transaction
-	cloneInterface, found := tx.getClonedEntity(generateEntityKey(entity))
+	entityKey := generateEntityKey(entity)
+	cloneInterface, found := tx.getClonedEntity(entityKey)
 	if !found {
-		return newEntity[T]()
+		entityBlank := newEntity[T]()
+		return &entityBlank
 	}
 
-	clone, ok := cloneInterface.(T)
+	// The stored clone should already be a pointer *T
+	clone, ok := cloneInterface.(*T)
 	if !ok {
-		return newEntity[T]()
+		entityBlank := newEntity[T]()
+		return &entityBlank
 	}
 
 	return clone
@@ -436,7 +442,7 @@ func generateEntityKey(entity interface{}) string {
 }
 
 // storeCloneIfInTransaction stores a clone of the entity if we're in a transaction and the entity supports cloning
-func storeCloneIfInTransaction[T any](db *gorm.DB, entity T) {
+func storeCloneIfInTransaction[T any](db *gorm.DB, entity *T) {
 	// Check if we're in a transaction context
 	txInterface, exists := db.Get(txContextKey)
 	if !exists {

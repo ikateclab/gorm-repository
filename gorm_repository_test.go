@@ -420,6 +420,10 @@ func TestGormRepository_UpdateById_WithTransactionAndClone(t *testing.T) {
 	// Modify the user
 	foundUser.Name = "Updated With Transaction"
 	foundUser.Age = 40
+	foundUser.Active = false
+	foundUser.Data.Day = 20
+	foundUser.Data.Nickname = "Doe"
+	foundUser.Data.Married = false
 
 	// Update with transaction and existing clone
 	err = repo.UpdateById(ctx, user.Id, foundUser, WithTx(tx))
@@ -435,6 +439,53 @@ func TestGormRepository_UpdateById_WithTransactionAndClone(t *testing.T) {
 
 	require.Equal(t, "Updated With Transaction", updatedUser.Name, "Expected updated name")
 	require.Equal(t, 40, updatedUser.Age, "Expected updated age")
+	require.False(t, updatedUser.Active, "Expected updated active")
+	require.Equal(t, 20, updatedUser.Data.Day, "Expected updated day")
+	require.Equal(t, "Doe", updatedUser.Data.Nickname, "Expected updated nickname")
+	require.False(t, updatedUser.Data.Married, "Expected updated Data.Married")
+}
+
+func TestGormRepository_UpdateById_ZeroValue_WithTransaction(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Start transaction and find user (this creates a clone)
+	tx := repo.BeginTransaction()
+
+	foundUser, err := repo.FindById(ctx, user.Id, WithTx(tx))
+	require.NoError(t, err, "Failed to find user in transaction")
+
+	// Modify the user
+	foundUser.Name = ""
+	foundUser.Age = 0
+	foundUser.Active = false
+	foundUser.Data.Day = 0
+	foundUser.Data.Nickname = ""
+	foundUser.Data.Married = false
+
+	// Update with transaction and existing clone
+	err = repo.UpdateById(ctx, user.Id, foundUser, WithTx(tx))
+	require.NoError(t, err, "UpdateById with transaction should not fail")
+
+	// Commit the transaction
+	err = tx.Commit()
+	require.NoError(t, err, "Failed to commit transaction")
+
+	// Verify the update
+	updatedUser, err := repo.FindById(ctx, user.Id)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.Equal(t, "", updatedUser.Name, "Expected updated name")
+	require.Equal(t, 0, updatedUser.Age, "Expected updated age")
+	require.False(t, updatedUser.Active, "Expected updated active")
+	require.Equal(t, 0, updatedUser.Data.Day, "Expected updated day")
+	require.Equal(t, "", updatedUser.Data.Nickname, "Expected updated nickname")
+	require.False(t, updatedUser.Data.Married, "Expected updated Data.Married")
 }
 
 func TestGormRepository_UpdateById_WithTransactionNoClone(t *testing.T) {
@@ -666,6 +717,49 @@ func TestGormRepository_UpdateInPlace_MultipleFields(t *testing.T) {
 	require.Equal(t, !originalActive, updatedUser.Active, "Active status should be toggled")
 	require.NotEqual(t, originalName, updatedUser.Name, "Name should be different from original")
 	require.NotEqual(t, originalAge, updatedUser.Age, "Age should be different from original")
+}
+
+// Test UpdateByIdInPlace with transaction focusing on boolean false values
+func TestGormRepository_UpdateByIdInPlace_ZeroValue_WithTransaction(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	// Create user with boolean fields set to true
+	user := createTestUser()
+	user.Active = true
+	user.Data.Married = true
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Start transaction
+	tx := repo.BeginTransaction()
+
+	// Update in place with boolean false values
+	err = repo.UpdateByIdInPlace(ctx, user.Id, user, func() {
+		user.Name = ""
+		user.Active = false
+		user.Age = 0
+		user.Data.Married = false
+		user.Data.Day = 0
+		user.Data.Nickname = ""
+	}, WithTx(tx))
+	require.NoError(t, err, "UpdateByIdInPlace with boolean false should not fail")
+
+	// Commit the transaction
+	err = tx.Commit()
+	require.NoError(t, err, "Failed to commit transaction")
+
+	// Verify the updates
+	updatedUser, err := repo.FindById(ctx, user.Id)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.False(t, updatedUser.Active, "Expected Active to be false")
+	require.False(t, updatedUser.Data.Married, "Expected Data.Married to be false")
+	require.Equal(t, 0, updatedUser.Data.Day, "Expected Data.Day to be 0")
+	require.Equal(t, "", updatedUser.Data.Nickname, "Expected Data.Nickname to be empty")
+	require.Equal(t, "", updatedUser.Name, "Expected name to be updated")
+	require.Equal(t, 0, updatedUser.Age, "Expected age to be updated")
 }
 
 func TestMain(m *testing.M) {
