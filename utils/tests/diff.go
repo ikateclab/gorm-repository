@@ -1,12 +1,12 @@
 package tests
 
 import (
-	"bytes"
+	"reflect"
+	"strings"
+
 	"github.com/bytedance/sonic"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"reflect"
-	"strings"
 )
 
 // isEmptyJSON checks if a JSON string represents an empty object or array
