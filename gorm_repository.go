@@ -141,7 +141,7 @@ func (r *GormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID,
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	entity := newEntity[T]()
 
-	if err := db.Model(&entity).Omit(clause.Associations).Where("id = ?", id).Updates(values).Error; err != nil {
+	if err := db.Model(&entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(values).Error; err != nil {
 		return nil, err
 	}
 	return &entity, nil
