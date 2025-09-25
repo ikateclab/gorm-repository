@@ -37,8 +37,8 @@ func BenchmarkGormRepository_Create(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Benchmark User %d", i),
 			Email:  fmt.Sprintf("benchmark%d@example.com", i),
 			Age:    25,
@@ -57,16 +57,16 @@ func BenchmarkGormRepository_FindById(b *testing.B) {
 	ctx := context.Background()
 
 	// Pre-create users for benchmarking
-	userIDs := make([]uuid.UUID, 1000)
+	userIds := make([]uuid.UUID, 1000)
 	for i := 0; i < 1000; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Benchmark User %d", i),
 			Email:  fmt.Sprintf("benchmark%d@example.com", i),
 			Age:    25 + i%50,
 			Active: true,
 		}
-		userIDs[i] = user.ID
+		userIds[i] = user.Id
 		err := repo.Create(ctx, user)
 		if err != nil {
 			b.Fatalf("Failed to create benchmark user: %v", err)
@@ -75,7 +75,7 @@ func BenchmarkGormRepository_FindById(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := repo.FindById(ctx, userIDs[i%1000])
+		_, err := repo.FindById(ctx, userIds[i%1000])
 		if err != nil {
 			b.Fatalf("FindById failed: %v", err)
 		}
@@ -89,8 +89,8 @@ func BenchmarkGormRepository_FindMany(b *testing.B) {
 
 	// Pre-create users
 	for i := 0; i < 100; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Benchmark User %d", i),
 			Email:  fmt.Sprintf("benchmark%d@example.com", i),
 			Age:    25 + i%50,
@@ -120,8 +120,8 @@ func BenchmarkGormRepository_FindPaginated(b *testing.B) {
 
 	// Pre-create users
 	for i := 0; i < 1000; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Benchmark User %d", i),
 			Email:  fmt.Sprintf("benchmark%d@example.com", i),
 			Age:    25 + i%50,
@@ -149,10 +149,10 @@ func BenchmarkGormRepository_Save(b *testing.B) {
 	ctx := context.Background()
 
 	// Pre-create users
-	users := make([]tests.TestUser, 100)
+	users := make([]*tests.TestUser, 100)
 	for i := 0; i < 100; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Benchmark User %d", i),
 			Email:  fmt.Sprintf("benchmark%d@example.com", i),
 			Age:    25,
@@ -186,8 +186,8 @@ func BenchmarkGormRepository_Transaction(b *testing.B) {
 		var err error
 		tx := repo.BeginTransaction()
 
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Transaction User %d", i),
 			Email:  fmt.Sprintf("tx%d@example.com", i),
 			Age:    25,
@@ -214,25 +214,25 @@ func BenchmarkGormRepository_WithRelations(b *testing.B) {
 	ctx := context.Background()
 
 	// Pre-create users with profiles
-	userIDs := make([]uuid.UUID, 100)
+	userIds := make([]uuid.UUID, 100)
 	for i := 0; i < 100; i++ {
-		user := tests.TestUser{
-			ID:     uuid.New(),
+		user := &tests.TestUser{
+			Id:     uuid.New(),
 			Name:   fmt.Sprintf("Benchmark User %d", i),
 			Email:  fmt.Sprintf("benchmark%d@example.com", i),
 			Age:    25,
 			Active: true,
 		}
-		userIDs[i] = user.ID
+		userIds[i] = user.Id
 
 		err := userRepo.Create(ctx, user)
 		if err != nil {
 			b.Fatalf("Failed to create benchmark user: %v", err)
 		}
 
-		profile := tests.TestProfile{
-			ID:      uuid.New(),
-			UserID:  user.ID,
+		profile := &tests.TestProfile{
+			Id:      uuid.New(),
+			UserId:  user.Id,
 			Bio:     fmt.Sprintf("Benchmark bio %d", i),
 			Website: fmt.Sprintf("https://benchmark%d.example.com", i),
 		}
@@ -244,7 +244,7 @@ func BenchmarkGormRepository_WithRelations(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := userRepo.FindById(ctx, userIDs[i%100], WithRelations("Profile"))
+		_, err := userRepo.FindById(ctx, userIds[i%100], WithRelations("Profile"))
 		if err != nil {
 			b.Fatalf("FindById with relations failed: %v", err)
 		}
@@ -252,8 +252,8 @@ func BenchmarkGormRepository_WithRelations(b *testing.B) {
 }
 
 func BenchmarkEntityToMap_SmallFields(b *testing.B) {
-	entity := tests.TestUser{
-		ID:     uuid.New(),
+	entity := &tests.TestUser{
+		Id:     uuid.New(),
 		Name:   "Benchmark User",
 		Email:  "benchmark@example.com",
 		Age:    25,
@@ -276,8 +276,8 @@ func BenchmarkEntityToMap_SmallFields(b *testing.B) {
 }
 
 func BenchmarkEntityToMap_LargeFields(b *testing.B) {
-	entity := tests.TestUser{
-		ID:     uuid.New(),
+	entity := &tests.TestUser{
+		Id:     uuid.New(),
 		Name:   "Benchmark User",
 		Email:  "benchmark@example.com",
 		Age:    25,
@@ -285,7 +285,7 @@ func BenchmarkEntityToMap_LargeFields(b *testing.B) {
 	}
 
 	fields := map[string]interface{}{
-		"ID":     nil,
+		"Id":     nil,
 		"Name":   nil,
 		"Email":  nil,
 		"Age":    nil,

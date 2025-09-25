@@ -116,9 +116,6 @@ func EntityToMap(fields map[string]interface{}, entity interface{}) (map[string]
 	return updateMap, nil
 }
 
-// Cache for column names
-var columnNameCache sync.Map
-
 // getFieldInfoMap retrieves or creates detailed field info mapping for a type
 func getFieldInfoMap(entityType reflect.Type) map[string]fieldInfo {
 	// Check cache first using read lock (faster)

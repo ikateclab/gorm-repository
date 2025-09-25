@@ -44,26 +44,26 @@ func (p *PaginationResult[T]) GetData() []T {
 
 // Diffable represents entities that can generate clones and diffs
 type Diffable[T any] interface {
-	Clone() T
-	Diff(T) map[string]interface{}
+	Diff(*T) map[string]interface{}
+	Clone() *T
 }
 
 type Repository[T any] interface {
-	FindMany(ctx context.Context, options ...Option) ([]T, error)
-	FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[T], error)
-	FindById(ctx context.Context, id uuid.UUID, options ...Option) (T, error)
-	FindOne(ctx context.Context, options ...Option) (T, error)
-	Create(ctx context.Context, entity T, options ...Option) error
-	Save(ctx context.Context, entity T, options ...Option) error
-	UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error
-	UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity T, options ...Option) error
-	UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (T, error)
-	UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(), options ...Option) error
-	UpdateInPlace(ctx context.Context, entity T, updateFunc func(), options ...Option) error
+	FindMany(ctx context.Context, options ...Option) ([]*T, error)
+	FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[*T], error)
+	FindById(ctx context.Context, id uuid.UUID, options ...Option) (*T, error)
+	FindOne(ctx context.Context, options ...Option) (*T, error)
+	Create(ctx context.Context, entity *T, options ...Option) error
+	Save(ctx context.Context, entity *T, options ...Option) error
+	UpdateById(ctx context.Context, id uuid.UUID, entity *T, options ...Option) error
+	UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity *T, options ...Option) error
+	UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (*T, error)
+	UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity *T, updateFunc func(), options ...Option) error
+	UpdateInPlace(ctx context.Context, entity *T, updateFunc func(), options ...Option) error
 	DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error
 	BeginTransaction() *Tx
-	AppendAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error
-	RemoveAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error
-	ReplaceAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error
+	AppendAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error
+	RemoveAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error
+	ReplaceAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error
 	GetDB() *gorm.DB
 }

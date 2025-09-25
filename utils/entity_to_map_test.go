@@ -7,7 +7,7 @@ import (
 
 // Test entity for entity_to_map tests
 type TestEntity struct {
-	ID       int                    `json:"id"`
+	Id       int                    `json:"id"`
 	Name     string                 `json:"name"`
 	Email    string                 `json:"email"`
 	Age      int                    `json:"age"`
@@ -23,7 +23,7 @@ type TestProfile struct {
 
 func TestEntityToMap_SimpleFields(t *testing.T) {
 	entity := TestEntity{
-		ID:     1,
+		Id:     1,
 		Name:   "John Doe",
 		Email:  "john@example.com",
 		Age:    30,
@@ -65,7 +65,7 @@ func TestEntityToMap_SimpleFields(t *testing.T) {
 
 func TestEntityToMap_NonExistentField(t *testing.T) {
 	entity := TestEntity{
-		ID:   1,
+		Id:   1,
 		Name: "John Doe",
 	}
 
@@ -91,7 +91,7 @@ func TestEntityToMap_PointerField(t *testing.T) {
 	}
 
 	entity := TestEntity{
-		ID:      1,
+		Id:      1,
 		Name:    "John Doe",
 		Profile: profile,
 	}
@@ -115,7 +115,7 @@ func TestEntityToMap_PointerField(t *testing.T) {
 
 func TestEntityToMap_NilPointerField(t *testing.T) {
 	entity := TestEntity{
-		ID:      1,
+		Id:      1,
 		Name:    "John Doe",
 		Profile: nil,
 	}
@@ -139,14 +139,14 @@ func TestEntityToMap_NilPointerField(t *testing.T) {
 
 func TestEntityToMap_SmallFieldCount(t *testing.T) {
 	entity := TestEntity{
-		ID:   1,
+		Id:   1,
 		Name: "John Doe",
 		Age:  30,
 	}
 
 	// Test with exactly smallFieldCount (4) fields
 	fields := map[string]interface{}{
-		"ID":   nil,
+		"Id":   nil,
 		"Name": nil,
 		"Age":  nil,
 	}
@@ -177,7 +177,7 @@ func TestGetFieldInfoMap_Caching(t *testing.T) {
 	}
 
 	// Verify specific fields exist
-	expectedFields := []string{"ID", "Name", "Email", "Age", "Active", "Settings", "Profile"}
+	expectedFields := []string{"Id", "Name", "Email", "Age", "Active", "Settings", "Profile"}
 	for _, field := range expectedFields {
 		if _, exists := fieldMap1[field]; !exists {
 			t.Errorf("Expected field %s not found in field map", field)

@@ -1,3 +1,8 @@
+# WIP ⚠️ 
+
+This package is a Work In Progress and production use is not recommended
+
+
 # GORM Repository
 
 A generic repository pattern implementation for GORM with advanced features including transaction management, entity diffing, and pagination.
@@ -30,7 +35,7 @@ import (
 
 // Create a repository for your entity
 type User struct {
-    ID    uuid.UUID `gorm:"type:text;primary_key"`
+    Id    uuid.UUID `gorm:"type:text;primary_key"`
     Name  string
     Email string
     Age   int
@@ -44,10 +49,10 @@ userRepo := gr.NewGormRepository[User](db)
 ctx := context.Background()
 
 // Create
-user := User{ID: uuid.New(), Name: "John", Email: "john@example.com"}
+user := User{Id: uuid.New(), Name: "John", Email: "john@example.com"}
 err := userRepo.Create(ctx, user)
 
-// Find by ID
+// Find by Id
 user, err := userRepo.FindById(ctx, userID)
 
 // Find many with options
@@ -64,21 +69,30 @@ result, err := userRepo.FindPaginated(ctx, 1, 10) // page 1, 10 items per page
 ### Entity Diffing
 
 Implement the `Diffable` interface to enable smart updates:
+Use this project https://github.com/ikateclab/gorm-tracked-updates to generate the `Diff` and `Clone` methods for models.
 
 ```go
 type User struct {
-    ID    uuid.UUID `gorm:"type:text;primary_key"`
+    Id    uuid.UUID `gorm:"type:text;primary_key"`
     Name  string
     Email string
     Age   int
 }
 
-// Implement Diffable interface
-func (u User) Clone() User {
-    return u // simple clone for this example
+
+// Implement the `Clone` method for the `Diffable` interface
+func (u *User) Clone() *User {
+    // Create a new User with the same attributes
+    return &User{
+        Id:    u.Id,
+        Name:  u.Name,
+        Email: u.Email,
+        Age:   u.Age,
+    }
 }
 
-func (u User) Diff(other User) map[string]interface{} {
+// Implement the `Diff` method for the `Diffable` interface
+func (u *User) Diff(other *User) map[string]interface{} {
     diff := make(map[string]interface{})
     if u.Name != other.Name {
         diff["name"] = u.Name
@@ -183,21 +197,22 @@ The repository implements the following interface:
 
 ```go
 type Repository[T any] interface {
-    FindMany(ctx context.Context, options ...Option) ([]T, error)
-    FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[T], error)
-    FindById(ctx context.Context, id uuid.UUID, options ...Option) (T, error)
-    FindOne(ctx context.Context, options ...Option) (T, error)
-    Create(ctx context.Context, entity T, options ...Option) error
-    Save(ctx context.Context, entity T, options ...Option) error
-    UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...Option) error
-    UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity T, options ...Option) error
-    UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (T, error)
-    UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(), options ...Option) error
+    FindMany(ctx context.Context, options ...Option) ([]*T, error)
+    FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[*T], error)
+    FindById(ctx context.Context, id uuid.UUID, options ...Option) (*T, error)
+    FindOne(ctx context.Context, options ...Option) (*T, error)
+    Create(ctx context.Context, entity *T, options ...Option) error
+    Save(ctx context.Context, entity *T, options ...Option) error
+    UpdateById(ctx context.Context, id uuid.UUID, entity *T, options ...Option) error
+    UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity *T, options ...Option) error
+    UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (*T, error)
+    UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity *T, updateFunc func(), options ...Option) error
+    UpdateInPlace(ctx context.Context, entity *T, updateFunc func(), options ...Option) error
     DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error
     BeginTransaction() *Tx
-    AppendAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error
-    RemoveAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error
-    ReplaceAssociation(ctx context.Context, entity T, association string, values interface{}, options ...Option) error
+    AppendAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error
+    RemoveAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error
+    ReplaceAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...Option) error
     GetDB() *gorm.DB
 }
 ```

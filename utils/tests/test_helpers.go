@@ -44,14 +44,14 @@ func SetupTestDBWithConfig(t *testing.T, config TestDBConfig) *gorm.DB {
 
 // TestUserBuilder provides a fluent interface for creating test users
 type TestUserBuilder struct {
-	user TestUser
+	user *TestUser
 }
 
 // NewTestUserBuilder creates a new test user builder with default values
 func NewTestUserBuilder() *TestUserBuilder {
 	return &TestUserBuilder{
-		user: TestUser{
-			ID:     uuid.New(),
+		user: &TestUser{
+			Id:     uuid.New(),
 			Name:   "Test User",
 			Email:  "test@example.com",
 			Age:    25,
@@ -60,9 +60,9 @@ func NewTestUserBuilder() *TestUserBuilder {
 	}
 }
 
-// WithID sets the user ID
+// WithID sets the user Id
 func (b *TestUserBuilder) WithID(id uuid.UUID) *TestUserBuilder {
-	b.user.ID = id
+	b.user.Id = id
 	return b
 }
 
@@ -97,27 +97,27 @@ func (b *TestUserBuilder) WithProfile(profile *TestProfile) *TestUserBuilder {
 }
 
 // WithPosts sets the user posts
-func (b *TestUserBuilder) WithPosts(posts []TestPost) *TestUserBuilder {
+func (b *TestUserBuilder) WithPosts(posts []*TestPost) *TestUserBuilder {
 	b.user.Posts = posts
 	return b
 }
 
 // Build returns the constructed test user
-func (b *TestUserBuilder) Build() TestUser {
+func (b *TestUserBuilder) Build() *TestUser {
 	return b.user
 }
 
 // TestProfileBuilder provides a fluent interface for creating test profiles
 type TestProfileBuilder struct {
-	profile TestProfile
+	profile *TestProfile
 }
 
 // NewTestProfileBuilder creates a new test profile builder with default values
 func NewTestProfileBuilder(userID uuid.UUID) *TestProfileBuilder {
 	return &TestProfileBuilder{
-		profile: TestProfile{
-			ID:       uuid.New(),
-			UserID:   userID,
+		profile: &TestProfile{
+			Id:       uuid.New(),
+			UserId:   userID,
 			Bio:      "Test bio",
 			Website:  "https://example.com",
 			Settings: "{}",
@@ -125,9 +125,9 @@ func NewTestProfileBuilder(userID uuid.UUID) *TestProfileBuilder {
 	}
 }
 
-// WithID sets the profile ID
+// WithID sets the profile Id
 func (b *TestProfileBuilder) WithID(id uuid.UUID) *TestProfileBuilder {
-	b.profile.ID = id
+	b.profile.Id = id
 	return b
 }
 
@@ -150,21 +150,21 @@ func (b *TestProfileBuilder) WithSettings(settings string) *TestProfileBuilder {
 }
 
 // Build returns the constructed test profile
-func (b *TestProfileBuilder) Build() TestProfile {
+func (b *TestProfileBuilder) Build() *TestProfile {
 	return b.profile
 }
 
 // TestPostBuilder provides a fluent interface for creating test posts
 type TestPostBuilder struct {
-	post TestPost
+	post *TestPost
 }
 
 // NewTestPostBuilder creates a new test post builder with default values
-func NewTestPostBuilder(userID uuid.UUID) *TestPostBuilder {
+func NewTestPostBuilder(userId uuid.UUID) *TestPostBuilder {
 	return &TestPostBuilder{
-		post: TestPost{
-			ID:        uuid.New(),
-			UserID:    userID,
+		post: &TestPost{
+			Id:        uuid.New(),
+			UserId:    userId,
 			Title:     "Test Post",
 			Content:   "Test content",
 			Published: false,
@@ -174,9 +174,9 @@ func NewTestPostBuilder(userID uuid.UUID) *TestPostBuilder {
 	}
 }
 
-// WithID sets the post ID
+// WithID sets the post Id
 func (b *TestPostBuilder) WithID(id uuid.UUID) *TestPostBuilder {
-	b.post.ID = id
+	b.post.Id = id
 	return b
 }
 
@@ -199,13 +199,13 @@ func (b *TestPostBuilder) WithPublished(published bool) *TestPostBuilder {
 }
 
 // WithTags sets the post tags
-func (b *TestPostBuilder) WithTags(tags []TestTag) *TestPostBuilder {
+func (b *TestPostBuilder) WithTags(tags []*TestTag) *TestPostBuilder {
 	b.post.Tags = tags
 	return b
 }
 
 // Build returns the constructed test post
-func (b *TestPostBuilder) Build() TestPost {
+func (b *TestPostBuilder) Build() *TestPost {
 	return b.post
 }
 
@@ -213,8 +213,8 @@ func (b *TestPostBuilder) Build() TestPost {
 func AssertUserEqual(t *testing.T, expected, actual TestUser, message string) {
 	t.Helper()
 
-	if expected.ID != actual.ID {
-		t.Errorf("%s: ID mismatch - expected %v, got %v", message, expected.ID, actual.ID)
+	if expected.Id != actual.Id {
+		t.Errorf("%s: Id mismatch - expected %v, got %v", message, expected.Id, actual.Id)
 	}
 	if expected.Name != actual.Name {
 		t.Errorf("%s: Name mismatch - expected %s, got %s", message, expected.Name, actual.Name)

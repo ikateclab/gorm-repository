@@ -6,112 +6,65 @@ import (
 	"github.com/google/uuid"
 )
 
+/// go :  go run ../../../gorm-tracked-updates/cmd/gorm-gen/main.go -package=.
+//go:generate go run github.com/ikateclab/gorm-tracked-updates/cmd/gorm-gen@v0.0.5 -package=.
+
+// @jsonb
+type UserData struct {
+	Day      int    `json:"day,omitempty"`
+	Nickname string `json:"nickname,omitempty"`
+	Married  bool   `json:"married,omitempty"`
+}
+
 // TestUser represents a test entity for repository testing
+// @jsonb
 type TestUser struct {
-	ID        uuid.UUID    `gorm:"type:text;primary_key" json:"id"`
-	Name      string       `gorm:"not null" json:"name"`
-	Email     string       `gorm:"unique;not null" json:"email"`
-	Age       int          `json:"age"`
-	Active    bool         `json:"active"`
-	Profile   *TestProfile `gorm:"foreignKey:UserID" json:"profile,omitempty"`
-	Posts     []TestPost   `gorm:"foreignKey:UserID" json:"posts,omitempty"`
-	CreatedAt time.Time    `json:"createdAt"`
-	UpdatedAt time.Time    `json:"updatedAt"`
-}
-
-// Clone implements the Diffable interface for pointer types
-func (u *TestUser) Clone() *TestUser {
-	if u == nil {
-		return nil
-	}
-	clone := *u
-	if u.Profile != nil {
-		profileClone := *u.Profile
-		clone.Profile = &profileClone
-	}
-	if u.Posts != nil {
-		clone.Posts = make([]TestPost, len(u.Posts))
-		copy(clone.Posts, u.Posts)
-	}
-	return &clone
-}
-
-// Diff implements the Diffable interface for pointer types
-func (u *TestUser) Diff(other *TestUser) map[string]interface{} {
-	if u == nil || other == nil {
-		return make(map[string]interface{})
-	}
-
-	diff := make(map[string]interface{})
-
-	if u.Name != other.Name {
-		diff["name"] = u.Name
-	}
-	if u.Email != other.Email {
-		diff["email"] = u.Email
-	}
-	if u.Age != other.Age {
-		diff["age"] = u.Age
-	}
-	if u.Active != other.Active {
-		diff["active"] = u.Active
-	}
-
-	return diff
+	Id         uuid.UUID    `gorm:"type:text;primary_key" json:"id"`
+	Name       string       `gorm:"not null" json:"name"`
+	Email      string       `gorm:"unique;not null" json:"email"`
+	Age        int          `json:"age"`
+	Active     bool         `json:"active"`
+	ArchivedAt *time.Time   `gorm:"column:archivedAt;type:timestamptz" json:"archivedAt,omitempty"`
+	Profile    *TestProfile `gorm:"foreignKey:UserId" json:"profile,omitempty"`
+	Posts      []*TestPost  `gorm:"foreignKey:UserId" json:"posts,omitempty"`
+	Data       *UserData    `gorm:"type:jsonb;serializer:json;not null;default:'{}'" json:"data,omitempty"`
 }
 
 // TestProfile represents a user profile for testing relationships
+// @jsonb
 type TestProfile struct {
-	ID       uuid.UUID `gorm:"type:text;primary_key" json:"id"`
-	UserID   uuid.UUID `gorm:"type:text;not null" json:"userId"`
+	Id       uuid.UUID `gorm:"type:text;primary_key" json:"id"`
+	UserId   uuid.UUID `gorm:"type:text;not null" json:"userId"`
 	Bio      string    `json:"bio"`
 	Website  string    `json:"website"`
 	Settings string    `gorm:"type:text" json:"settings"`
 }
 
 // TestPost represents a blog post for testing one-to-many relationships
+// @jsonb
 type TestPost struct {
-	ID        uuid.UUID `gorm:"type:text;primary_key" json:"id"`
-	UserID    uuid.UUID `gorm:"type:text;not null" json:"userId"`
-	Title     string    `gorm:"not null" json:"title"`
-	Content   string    `json:"content"`
-	Published bool      `json:"published"`
-	Tags      []TestTag `gorm:"many2many:post_tags;" json:"tags,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Id        uuid.UUID  `gorm:"type:text;primary_key" json:"id"`
+	UserId    uuid.UUID  `gorm:"type:text;not null" json:"userId"`
+	Title     string     `gorm:"not null" json:"title"`
+	Content   string     `json:"content"`
+	Published bool       `json:"published"`
+	Tags      []*TestTag `gorm:"many2many:post_tags;" json:"tags,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
 }
 
 // TestTag represents a tag for testing many-to-many relationships
+// @jsonb
 type TestTag struct {
-	ID    uuid.UUID  `gorm:"type:text;primary_key" json:"id"`
-	Name  string     `gorm:"unique;not null" json:"name"`
-	Posts []TestPost `gorm:"many2many:post_tags;" json:"posts,omitempty"`
+	Id    uuid.UUID   `gorm:"type:text;primary_key" json:"id"`
+	Name  string      `gorm:"unique;not null" json:"name"`
+	Posts []*TestPost `gorm:"many2many:post_tags;" json:"posts,omitempty"`
 }
 
 // TestSimpleEntity represents a simple entity without relationships
+
+// @jsonb
 type TestSimpleEntity struct {
-	ID    uuid.UUID `gorm:"type:text;primary_key" json:"id"`
+	Id    uuid.UUID `gorm:"type:text;primary_key" json:"id"`
 	Value string    `json:"value"`
-}
-
-// Clone implements the Diffable interface for pointer types
-func (e *TestSimpleEntity) Clone() *TestSimpleEntity {
-	if e == nil {
-		return nil
-	}
-	clone := *e
-	return &clone
-}
-
-// Diff implements the Diffable interface for pointer types
-func (e *TestSimpleEntity) Diff(other *TestSimpleEntity) map[string]interface{} {
-	if e == nil || other == nil {
-		return make(map[string]interface{})
-	}
-
-	diff := make(map[string]interface{})
-	if e.Value != other.Value {
-		diff["value"] = e.Value
-	}
-	return diff
 }
