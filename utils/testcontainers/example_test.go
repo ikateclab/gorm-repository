@@ -20,7 +20,7 @@ func TestDatabaseSetup_Example(t *testing.T) {
 
 	// Create a test user
 	user := &tests.TestUser{
-		ID:     uuid.New(),
+		Id:     uuid.New(),
 		Name:   "Test User",
 		Email:  "test@example.com",
 		Age:    25,
@@ -33,7 +33,7 @@ func TestDatabaseSetup_Example(t *testing.T) {
 
 	// Find the user
 	var foundUser tests.TestUser
-	err = db.First(&foundUser, "id = ?", user.ID).Error
+	err = db.First(&foundUser, "id = ?", user.Id).Error
 	require.NoError(t, err, "Failed to find user")
 	require.Equal(t, user.Name, foundUser.Name, "User name should match")
 	require.Equal(t, user.Email, foundUser.Email, "User email should match")
@@ -73,7 +73,7 @@ func TestCombinedSetup_Example(t *testing.T) {
 
 	// Create a user in database
 	user := &tests.TestUser{
-		ID:     uuid.New(),
+		Id:     uuid.New(),
 		Name:   "Combined Test User",
 		Email:  "combined@example.com",
 		Age:    30,
@@ -84,13 +84,13 @@ func TestCombinedSetup_Example(t *testing.T) {
 	require.NoError(t, err, "Failed to create user in database")
 
 	// Cache user ID in Redis
-	cacheKey := "user:" + user.ID.String()
+	cacheKey := "user:" + user.Id.String()
 	err = redisClient.Set(ctx, cacheKey, user.Name, 0).Err()
 	require.NoError(t, err, "Failed to cache user in Redis")
 
 	// Verify both database and cache
 	var dbUser tests.TestUser
-	err = db.First(&dbUser, "id = ?", user.ID).Error
+	err = db.First(&dbUser, "id = ?", user.Id).Error
 	require.NoError(t, err, "Failed to find user in database")
 
 	cachedName, err := redisClient.Get(ctx, cacheKey).Result()

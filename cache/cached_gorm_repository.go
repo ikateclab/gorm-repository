@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 
@@ -216,7 +217,7 @@ func (r *CachedGormRepository[T]) buildListTagsFromDataAndQuery(data []T, query 
 	return tags
 }
 
-func (r *CachedGormRepository[T]) buildSingleTagsFromDataAndQuery(id string, data interface{}, query map[string]interface{}) []RawTag {
+func (r *CachedGormRepository[T]) buildSingleTagsFromDataAndQuery(id string, _ interface{}, _ map[string]interface{}) []RawTag {
 	var tags []RawTag
 	tags = append(tags, r.makeKey(id))
 	return tags
@@ -224,7 +225,7 @@ func (r *CachedGormRepository[T]) buildSingleTagsFromDataAndQuery(id string, dat
 
 // Cached repository methods
 
-func (r *CachedGormRepository[T]) FindMany(ctx context.Context, options ...gormrepository.Option) ([]T, error) {
+func (r *CachedGormRepository[T]) FindMany(ctx context.Context, options ...gormrepository.Option) ([]*T, error) {
 	query := r.optionsToQuery(options)
 
 	cacheKey := []interface{}{r.getResourceName(), r.parseQueryToKey(query)}
@@ -248,14 +249,28 @@ func (r *CachedGormRepository[T]) FindMany(ctx context.Context, options ...gormr
 		return nil, err
 	}
 
-	if data, ok := result.([]T); ok {
+	// From database
+	if data, ok := result.([]*T); ok {
 		return data, nil
 	}
 
-	return []T{}, nil
-}
+	// From cache
+	if data, ok := result.([]interface{}); ok {
+		var entities []*T
+		for _, item := range data {
+			if mapItem, ok := item.(map[string]interface{}); ok {
+				entity := newEntity[T]()
+				jsonData, _ := json.Marshal(mapItem)
+				json.Unmarshal(jsonData, &entity)
+				entities = append(entities, &entity)
+			}
+		}
+		return entities, nil
+	}
 
-func (r *CachedGormRepository[T]) FindPaginated(ctx context.Context, page int, pageSize int, options ...gormrepository.Option) (*gormrepository.PaginationResult[T], error) {
+	return []*T{}, nil
+}
+func (r *CachedGormRepository[T]) FindPaginated(ctx context.Context, page int, pageSize int, options ...gormrepository.Option) (*gormrepository.PaginationResult[*T], error) {
 	query := r.optionsToQuery(options)
 	query["page"] = page
 	query["perPage"] = pageSize
@@ -281,14 +296,24 @@ func (r *CachedGormRepository[T]) FindPaginated(ctx context.Context, page int, p
 		return nil, err
 	}
 
-	if paginationResult, ok := result.(*gormrepository.PaginationResult[T]); ok {
-		return paginationResult, nil
+	// From database
+	if paginationResult, ok := result.(gormrepository.PaginationResult[*T]); ok {
+		return &paginationResult, nil
 	}
 
-	return nil, fmt.Errorf("unexpected result type")
+	// From cache
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		jsonData, _ := json.Marshal(resultMap)
+		var paginationResult gormrepository.PaginationResult[*T]
+		json.Unmarshal(jsonData, &paginationResult)
+		return &paginationResult, nil
+	}
+
+	// Unexpected type
+	return nil, fmt.Errorf("unexpected result type: %T", result)
 }
 
-func (r *CachedGormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options ...gormrepository.Option) (T, error) {
+func (r *CachedGormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options ...gormrepository.Option) (*T, error) {
 	query := r.optionsToQuery(options)
 	idStr := id.String()
 
@@ -307,17 +332,26 @@ func (r *CachedGormRepository[T]) FindById(ctx context.Context, id uuid.UUID, op
 	)
 
 	if err != nil {
-		return *new(T), err
+		return new(T), err
 	}
 
+	// From database
 	if data, ok := result.(T); ok {
-		return data, nil
+		return &data, nil
 	}
 
-	return *new(T), nil
+	// From cache
+	if data, ok := result.(map[string]interface{}); ok {
+		entity := newEntity[T]()
+		jsonData, _ := json.Marshal(data)
+		json.Unmarshal(jsonData, &entity)
+		return &entity, nil
+	}
+
+	return new(T), nil
 }
 
-func (r *CachedGormRepository[T]) FindOne(ctx context.Context, options ...gormrepository.Option) (T, error) {
+func (r *CachedGormRepository[T]) FindOne(ctx context.Context, options ...gormrepository.Option) (*T, error) {
 	query := r.optionsToQuery(options)
 
 	cacheKey := []interface{}{r.getResourceName(), r.parseQueryToKey(query)}
@@ -338,19 +372,28 @@ func (r *CachedGormRepository[T]) FindOne(ctx context.Context, options ...gormre
 	)
 
 	if err != nil {
-		return *new(T), err
+		return new(T), err
 	}
 
+	// From database
 	if data, ok := result.(T); ok {
-		return data, nil
+		return &data, nil
 	}
 
-	return *new(T), nil
+	// From cache
+	if data, ok := result.(map[string]interface{}); ok {
+		entity := newEntity[T]()
+		jsonData, _ := json.Marshal(data)
+		json.Unmarshal(jsonData, &entity)
+		return &entity, nil
+	}
+
+	return new(T), nil
 }
 
 // Write operations that invalidate cache
 
-func (r *CachedGormRepository[T]) Create(ctx context.Context, entity T, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) Create(ctx context.Context, entity *T, options ...gormrepository.Option) error {
 	err := r.GormRepository.Create(ctx, entity, options...)
 	if err != nil {
 		return err
@@ -361,7 +404,7 @@ func (r *CachedGormRepository[T]) Create(ctx context.Context, entity T, options 
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) Save(ctx context.Context, entity T, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) Save(ctx context.Context, entity *T, options ...gormrepository.Option) error {
 	err := r.GormRepository.Save(ctx, entity, options...)
 	if err != nil {
 		return err
@@ -372,7 +415,7 @@ func (r *CachedGormRepository[T]) Save(ctx context.Context, entity T, options ..
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity T, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity *T, options ...gormrepository.Option) error {
 	err := r.GormRepository.UpdateById(ctx, id, entity, options...)
 	if err != nil {
 		return err
@@ -383,7 +426,7 @@ func (r *CachedGormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, 
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity T, updateFunc func(), options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity *T, updateFunc func(), options ...gormrepository.Option) error {
 	err := r.GormRepository.UpdateByIdInPlace(ctx, id, entity, updateFunc, options...)
 	if err != nil {
 		return err
@@ -394,7 +437,7 @@ func (r *CachedGormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity T, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity *T, options ...gormrepository.Option) error {
 	err := r.GormRepository.UpdateByIdWithMask(ctx, id, mask, entity, options...)
 	if err != nil {
 		return err
@@ -405,7 +448,7 @@ func (r *CachedGormRepository[T]) UpdateByIdWithMask(ctx context.Context, id uui
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...gormrepository.Option) (T, error) {
+func (r *CachedGormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...gormrepository.Option) (*T, error) {
 	result, err := r.GormRepository.UpdateByIdWithMap(ctx, id, values, options...)
 	if err != nil {
 		return result, err
@@ -421,7 +464,7 @@ func (r *CachedGormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid
 	return result, nil
 }
 
-func (r *CachedGormRepository[T]) UpdateInPlace(ctx context.Context, entity T, updateFunc func(), options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, updateFunc func(), options ...gormrepository.Option) error {
 	err := r.GormRepository.UpdateInPlace(ctx, entity, updateFunc, options...)
 	if err != nil {
 		return err
@@ -445,7 +488,7 @@ func (r *CachedGormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, 
 }
 
 // Association methods
-func (r *CachedGormRepository[T]) AppendAssociation(ctx context.Context, entity T, association string, values interface{}, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) AppendAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...gormrepository.Option) error {
 	err := r.GormRepository.AppendAssociation(ctx, entity, association, values, options...)
 	if err != nil {
 		return err
@@ -456,7 +499,7 @@ func (r *CachedGormRepository[T]) AppendAssociation(ctx context.Context, entity 
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) RemoveAssociation(ctx context.Context, entity T, association string, values interface{}, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) RemoveAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...gormrepository.Option) error {
 	err := r.GormRepository.RemoveAssociation(ctx, entity, association, values, options...)
 	if err != nil {
 		return err
@@ -467,7 +510,7 @@ func (r *CachedGormRepository[T]) RemoveAssociation(ctx context.Context, entity 
 	}, options)
 }
 
-func (r *CachedGormRepository[T]) ReplaceAssociation(ctx context.Context, entity T, association string, values interface{}, options ...gormrepository.Option) error {
+func (r *CachedGormRepository[T]) ReplaceAssociation(ctx context.Context, entity *T, association string, values interface{}, options ...gormrepository.Option) error {
 	err := r.GormRepository.ReplaceAssociation(ctx, entity, association, values, options...)
 	if err != nil {
 		return err
@@ -527,15 +570,15 @@ func (r *CachedGormRepository[T]) forgetCacheListFromData(ctx context.Context, d
 	return r.cache.ForgetByTags(ctx, rawTags)
 }
 
-func (r *CachedGormRepository[T]) forgetCacheById(ctx context.Context, id string) error {
-	tags := []RawTag{r.makeKey(id)}
-	return r.cache.ForgetByTags(ctx, tags)
-}
+// func (r *CachedGormRepository[T]) forgetCacheById(ctx context.Context, id string) error {
+// 	tags := []RawTag{r.makeKey(id)}
+// 	return r.cache.ForgetByTags(ctx, tags)
+// }
 
-func (r *CachedGormRepository[T]) forgetCacheList(ctx context.Context) error {
-	tags := []RawTag{r.makeKey("no-account:list")}
-	return r.cache.ForgetByTags(ctx, tags)
-}
+// func (r *CachedGormRepository[T]) forgetCacheList(ctx context.Context) error {
+// 	tags := []RawTag{r.makeKey("no-account:list")}
+// 	return r.cache.ForgetByTags(ctx, tags)
+// }
 
 func (r *CachedGormRepository[T]) forgetCacheListAndId(ctx context.Context, id string) error {
 	tags := []RawTag{
@@ -618,4 +661,13 @@ func (r *CachedGormRepository[T]) optionsToQuery(options []gormrepository.Option
 	}
 
 	return query
+}
+
+func newEntity[T any]() T {
+	var entity T
+	entityType := reflect.TypeOf(entity)
+	if entityType.Kind() == reflect.Ptr {
+		return reflect.New(entityType.Elem()).Interface().(T)
+	}
+	return entity
 }

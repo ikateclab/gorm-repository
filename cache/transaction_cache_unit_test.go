@@ -16,13 +16,13 @@ import (
 
 // MockResourceCache implements a simple in-memory cache for testing
 type MockResourceCache struct {
-	data map[string]interface{}
+	data            map[string]interface{}
 	invalidatedTags []string
 }
 
 func NewMockResourceCache() *MockResourceCache {
 	return &MockResourceCache{
-		data: make(map[string]interface{}),
+		data:            make(map[string]interface{}),
 		invalidatedTags: make([]string, 0),
 	}
 }
@@ -69,7 +69,7 @@ func setupUnitTestDB(t *testing.T) *gorm.DB {
 func createUnitTestUser() *tests.TestUser {
 	id := uuid.New()
 	return &tests.TestUser{
-		ID:     id,
+		Id:     id,
 		Name:   "Unit Test User",
 		Email:  fmt.Sprintf("unit-%s@test.com", id.String()[:8]),
 		Age:    25,
@@ -82,7 +82,7 @@ func TestTransactionAwareCaching_CommitInvalidatesCache(t *testing.T) {
 	mockCache := NewMockResourceCache()
 
 	// Create a cached repository with mock cache
-	repo := NewCachedGormRepositoryWithCache[*tests.TestUser](db, mockCache, "test-v1", true)
+	repo := NewCachedGormRepositoryWithCache[tests.TestUser](db, mockCache, "test-v1", true)
 
 	ctx := context.Background()
 	user := createUnitTestUser()
@@ -123,15 +123,15 @@ func TestTransactionAwareCaching_RollbackDoesNotInvalidateCache(t *testing.T) {
 	mockCache := NewMockResourceCache()
 
 	// Create a cached repository with mock cache
-	repo := NewCachedGormRepositoryWithCache[*tests.TestUser](db, mockCache, "test-v1", true)
-	
+	repo := NewCachedGormRepositoryWithCache[tests.TestUser](db, mockCache, "test-v1", true)
+
 	ctx := context.Background()
 	user := createUnitTestUser()
 
 	// Create user outside transaction
 	err := repo.Create(ctx, user)
 	require.NoError(t, err, "Create should succeed")
-	
+
 	// Clear invalidated tags for clean test
 	mockCache.ClearInvalidatedTags()
 
@@ -159,7 +159,7 @@ func TestTransactionAwareCaching_MultipleOperationsInTransaction(t *testing.T) {
 	mockCache := NewMockResourceCache()
 
 	// Create a cached repository with mock cache
-	repo := NewCachedGormRepositoryWithCache[*tests.TestUser](db, mockCache, "test-v1", true)
+	repo := NewCachedGormRepositoryWithCache[tests.TestUser](db, mockCache, "test-v1", true)
 
 	ctx := context.Background()
 	user1 := createUnitTestUser()
@@ -202,17 +202,17 @@ func TestTransactionAwareCaching_MultipleOperationsInTransaction(t *testing.T) {
 func TestTransactionCacheManager_QueueAndExecute(t *testing.T) {
 	manager := gormrepository.NewTransactionCacheManager()
 	ctx := context.Background()
-	
+
 	executed := false
 	operation := func(ctx context.Context) error {
 		executed = true
 		return nil
 	}
-	
+
 	// Queue operation
 	manager.QueueOperation(operation)
 	require.False(t, executed, "Operation should not be executed immediately")
-	
+
 	// Execute on commit
 	manager.ExecuteOnCommit(ctx)
 	require.True(t, executed, "Operation should be executed on commit")
@@ -221,20 +221,20 @@ func TestTransactionCacheManager_QueueAndExecute(t *testing.T) {
 func TestTransactionCacheManager_ClearOnRollback(t *testing.T) {
 	manager := gormrepository.NewTransactionCacheManager()
 	ctx := context.Background()
-	
+
 	executed := false
 	operation := func(ctx context.Context) error {
 		executed = true
 		return nil
 	}
-	
+
 	// Queue operation
 	manager.QueueOperation(operation)
 	require.False(t, executed, "Operation should not be executed immediately")
-	
+
 	// Clear on rollback
 	manager.ClearOnRollback()
-	
+
 	// Execute on commit should do nothing now
 	manager.ExecuteOnCommit(ctx)
 	require.False(t, executed, "Operation should not be executed after rollback")

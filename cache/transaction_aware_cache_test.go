@@ -122,7 +122,7 @@ func setupTransactionTestCache(t *testing.T) (*resourceCache, *redis.Client, fun
 
 func createTransactionTestUser() *tests.TestUser {
 	return &tests.TestUser{
-		ID:     uuid.New(),
+		Id:     uuid.New(),
 		Name:   "Transaction Test User",
 		Email:  "transaction@test.com",
 		Age:    30,
@@ -137,7 +137,7 @@ func TestCachedGormRepository_TransactionCommit_InvalidatesCache(t *testing.T) {
 	cache, _, cacheCleanup := setupTransactionTestCache(t)
 	defer cacheCleanup()
 
-	repo := NewCachedGormRepository[*tests.TestUser](db, cache, "test-schema-v1", true)
+	repo := NewCachedGormRepository[tests.TestUser](db, cache, "test-schema-v1", true)
 	ctx := context.Background()
 
 	// Create a user to establish cache
@@ -147,12 +147,12 @@ func TestCachedGormRepository_TransactionCommit_InvalidatesCache(t *testing.T) {
 
 	// Verify the user was created in the database
 	var dbUser tests.TestUser
-	err = db.First(&dbUser, "id = ?", user.ID).Error
+	err = db.First(&dbUser, "id = ?", user.Id).Error
 	require.NoError(t, err, "User should exist in database after create")
 	t.Logf("Created user in database: %s", dbUser.Name)
 
 	// Read the user to populate cache
-	foundUser, err := repo.FindById(ctx, user.ID)
+	foundUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById should succeed")
 	require.NotNil(t, foundUser, "Found user should not be nil")
 	require.Equal(t, user.Name, foundUser.Name, "Found user should match created user")
@@ -185,11 +185,11 @@ func TestCachedGormRepository_TransactionCommit_InvalidatesCache(t *testing.T) {
 
 	// Verify that fresh data is returned after commit
 	// First check if the record exists in the database directly
-	err = db.First(&dbUser, "id = ?", user.ID).Error
+	err = db.First(&dbUser, "id = ?", user.Id).Error
 	require.NoError(t, err, "Direct DB read should succeed after transaction")
 	t.Logf("Database user name after transaction: %s", dbUser.Name)
 
-	freshUser, err := repo.FindById(ctx, user.ID)
+	freshUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById after commit should succeed")
 	require.NotNil(t, freshUser, "Fresh user should not be nil")
 	if freshUser != nil {
@@ -204,7 +204,7 @@ func TestCachedGormRepository_TransactionRollback_DoesNotInvalidateCache(t *test
 	cache, _, cacheCleanup := setupTransactionTestCache(t)
 	defer cacheCleanup()
 
-	repo := NewCachedGormRepository[*tests.TestUser](db, cache, "test-schema-v1", true)
+	repo := NewCachedGormRepository[tests.TestUser](db, cache, "test-schema-v1", true)
 	ctx := context.Background()
 
 	// Create a user to establish cache
@@ -213,7 +213,7 @@ func TestCachedGormRepository_TransactionRollback_DoesNotInvalidateCache(t *test
 	require.NoError(t, err, "Initial create should succeed")
 
 	// Read the user to populate cache
-	foundUser, err := repo.FindById(ctx, user.ID)
+	foundUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById should succeed")
 	require.Equal(t, user.Name, foundUser.Name, "Found user should match created user")
 
@@ -239,12 +239,12 @@ func TestCachedGormRepository_TransactionRollback_DoesNotInvalidateCache(t *test
 	// Cache should not be invalidated, and database should contain original data
 	// Read from database directly to verify rollback worked
 	var dbUser tests.TestUser
-	err = db.First(&dbUser, "id = ?", user.ID).Error
+	err = db.First(&dbUser, "id = ?", user.Id).Error
 	require.NoError(t, err, "Direct DB read should succeed")
 	require.Equal(t, originalName, dbUser.Name, "Database should contain original data after rollback")
 
 	// Cache should also still work and return consistent data
-	cachedUser, err := repo.FindById(ctx, user.ID)
+	cachedUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById should succeed")
 	require.Equal(t, originalName, cachedUser.Name, "Cache should return original data after rollback")
 }
@@ -256,7 +256,7 @@ func TestCachedGormRepository_NonTransactional_ImmediateInvalidation(t *testing.
 	cache, _, cacheCleanup := setupTransactionTestCache(t)
 	defer cacheCleanup()
 
-	repo := NewCachedGormRepository[*tests.TestUser](db, cache, "test-schema-v1", true)
+	repo := NewCachedGormRepository[tests.TestUser](db, cache, "test-schema-v1", true)
 	ctx := context.Background()
 
 	// Create a user to establish cache
@@ -265,7 +265,7 @@ func TestCachedGormRepository_NonTransactional_ImmediateInvalidation(t *testing.
 	require.NoError(t, err, "Initial create should succeed")
 
 	// Read the user to populate cache
-	foundUser, err := repo.FindById(ctx, user.ID)
+	foundUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById should succeed")
 	require.Equal(t, user.Name, foundUser.Name, "Found user should match created user")
 
@@ -275,7 +275,7 @@ func TestCachedGormRepository_NonTransactional_ImmediateInvalidation(t *testing.
 	require.NoError(t, err, "Save without transaction should succeed")
 
 	// Cache should be immediately invalidated
-	updatedUser, err := repo.FindById(ctx, user.ID)
+	updatedUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById should succeed")
 	require.Equal(t, "Updated Without Transaction", updatedUser.Name, "Should get updated data immediately")
 }
@@ -287,7 +287,7 @@ func TestCachedGormRepository_NestedTransactions(t *testing.T) {
 	cache, _, cacheCleanup := setupTransactionTestCache(t)
 	defer cacheCleanup()
 
-	repo := NewCachedGormRepository[*tests.TestUser](db, cache, "test-schema-v1", true)
+	repo := NewCachedGormRepository[tests.TestUser](db, cache, "test-schema-v1", true)
 	ctx := context.Background()
 
 	// Create a user to establish cache
@@ -324,7 +324,7 @@ func TestCachedGormRepository_NestedTransactions(t *testing.T) {
 	require.NoError(t, outerTxErr, "Outer transaction commit should succeed")
 
 	// Verify final state
-	finalUser, err := repo.FindById(ctx, user.ID)
+	finalUser, err := repo.FindById(ctx, user.Id)
 	require.NoError(t, err, "FindById should succeed")
 	require.Equal(t, "Updated in Inner Transaction", finalUser.Name, "Should get final updated data")
 }

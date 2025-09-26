@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 )
 
@@ -205,12 +206,18 @@ func (rc *resourceCache) Remember(
 
 	// Get value from source
 	value, err := getValue()
+
 	if err != nil {
 		return nil, err
 	}
 
 	if value == nil {
 		return value, nil
+	}
+
+	// Gormrepository always return a pointer, so we need to dereference it
+	if reflect.TypeOf(value).Kind() == reflect.Ptr {
+		value = reflect.ValueOf(value).Elem().Interface()
 	}
 
 	// Get tags

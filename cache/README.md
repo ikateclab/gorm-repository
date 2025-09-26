@@ -55,11 +55,11 @@ userRepo := cache.NewCachedGormRepository[*User](db, resourceCache, "v1.0.0", tr
 Your entity must implement the `Diffable` interface for cache invalidation:
 
 ```go
-type User struct {
-    ID        uuid.UUID `gorm:"type:text;primary_key" json:"id"`
-    Name      string    `json:"name"`
-    Email     string    `json:"email"`
-    AccountId string    `json:"accountId"` // For multi-tenant caching
+type TestUser struct {
+	ID        uuid.UUID `gorm:"type:text;primary_key" json:"id"`
+	Name      string    `gorm:"type:text" json:"name"`
+	Email     string    `gorm:"type:text" json:"email"`
+	AccountId string    `gorm:"column:accountId;type:text" json:"accountId"`
 }
 
 // Implement Diffable interface

@@ -3,7 +3,10 @@ package cache
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
@@ -11,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	gormrepository "github.com/ikateclab/gorm-repository"
 )
@@ -18,9 +22,9 @@ import (
 // Test entity
 type TestUser struct {
 	ID        uuid.UUID `gorm:"type:text;primary_key" json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	AccountId string    `json:"accountId"`
+	Name      string    `gorm:"type:text" json:"name"`
+	Email     string    `gorm:"type:text" json:"email"`
+	AccountId string    `gorm:"column:accountId;type:text" json:"accountId"`
 }
 
 // Implement Diffable interface
@@ -34,14 +38,14 @@ func (u *TestUser) Clone() *TestUser {
 
 func (u *TestUser) Diff(other *TestUser) map[string]interface{} {
 	diff := make(map[string]interface{})
-	
+
 	if other == nil {
 		diff["name"] = u.Name
 		diff["email"] = u.Email
 		diff["accountId"] = u.AccountId
 		return diff
 	}
-	
+
 	if u.Name != other.Name {
 		diff["name"] = u.Name
 	}
@@ -51,13 +55,26 @@ func (u *TestUser) Diff(other *TestUser) map[string]interface{} {
 	if u.AccountId != other.AccountId {
 		diff["accountId"] = u.AccountId
 	}
-	
+
 	return diff
 }
 
-func setupTestEnvironment(t *testing.T) (*CachedGormRepository[*TestUser], *redis.Client, context.Context) {
+func setupTestEnvironment(t *testing.T) (*CachedGormRepository[TestUser], *redis.Client, context.Context) {
+	newLogger := logger.New(
+		log.New(os.Stdout, "\r", log.LstdFlags), // io writer
+		logger.Config{
+			SlowThreshold:             500 * time.Millisecond, // Slow SQL threshold
+			LogLevel:                  logger.Info,            // Log level
+			IgnoreRecordNotFoundError: true,                   // Ignore ErrRecordNotFound error for logger
+			ParameterizedQueries:      false,                  // Don't include params in the SQL log
+			Colorful:                  true,                   // Colorful log
+		},
+	)
+
 	// Setup database
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: newLogger,
+	})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&TestUser{}))
 
@@ -68,7 +85,7 @@ func setupTestEnvironment(t *testing.T) (*CachedGormRepository[*TestUser], *redi
 	})
 
 	ctx := context.Background()
-	
+
 	// Clear test database
 	redisClient.FlushDB(ctx)
 
@@ -84,7 +101,7 @@ func setupTestEnvironment(t *testing.T) (*CachedGormRepository[*TestUser], *redi
 	resourceCache := NewResourceCache(logger, tagCache, "test-v1.0.0", true)
 
 	// Create cached repository
-	repo := NewCachedGormRepository[*TestUser](db, resourceCache, "test-v1.0.0", true)
+	repo := NewCachedGormRepository[TestUser](db, resourceCache, "test-v1.0.0", true)
 
 	return repo, redisClient, ctx
 }
@@ -107,6 +124,7 @@ func TestCachedRepository_BasicOperations(t *testing.T) {
 
 	// Test FindById (should cache the result)
 	foundUser, err := repo.FindById(ctx, user.ID)
+
 	require.NoError(t, err)
 	assert.Equal(t, user.Name, foundUser.Name)
 	assert.Equal(t, user.Email, foundUser.Email)
@@ -145,14 +163,14 @@ func TestCachedRepository_FindMany(t *testing.T) {
 
 	// Test FindMany with query (should cache the result)
 	foundUsers, err := repo.FindMany(ctx, gormrepository.WithQuery(func(db *gorm.DB) *gorm.DB {
-		return db.Where("account_id = ?", "account-1")
+		return db.Where("accountId = ?", "account-1")
 	}))
 	require.NoError(t, err)
 	assert.Len(t, foundUsers, 2)
 
 	// Test FindMany again (should hit cache)
 	foundUsers2, err := repo.FindMany(ctx, gormrepository.WithQuery(func(db *gorm.DB) *gorm.DB {
-		return db.Where("account_id = ?", "account-1")
+		return db.Where("accountId = ?", "account-1")
 	}))
 	require.NoError(t, err)
 	assert.Len(t, foundUsers2, 2)
@@ -242,15 +260,15 @@ func TestCachedRepository_AssociationMethods(t *testing.T) {
 
 	// Test association methods (they should not panic and should invalidate cache)
 	// Note: These are basic tests since we don't have actual associations in TestUser
-	err = repo.AppendAssociation(ctx, user, "tags", []string{"tag1"})
+	_ = repo.AppendAssociation(ctx, user, "tags", []string{"tag1"})
 	// This might error due to no actual association, but shouldn't panic
-	
-	err = repo.RemoveAssociation(ctx, user, "tags", []string{"tag1"})
+
+	_ = repo.RemoveAssociation(ctx, user, "tags", []string{"tag1"})
 	// This might error due to no actual association, but shouldn't panic
-	
-	err = repo.ReplaceAssociation(ctx, user, "tags", []string{"tag2"})
+
+	_ = repo.ReplaceAssociation(ctx, user, "tags", []string{"tag2"})
 	// This might error due to no actual association, but shouldn't panic
-	
+
 	// The main thing is that these methods exist and don't panic
 	assert.NotNil(t, repo.AppendAssociation)
 	assert.NotNil(t, repo.RemoveAssociation)

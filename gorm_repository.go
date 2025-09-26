@@ -20,7 +20,7 @@ const (
 // TransactionCacheManager manages cache operations that should be executed on transaction commit
 type TransactionCacheManager struct {
 	pendingOperations []func(context.Context) error
-	mutex            sync.RWMutex
+	mutex             sync.RWMutex
 }
 
 // NewTransactionCacheManager creates a new cache manager for transactions
