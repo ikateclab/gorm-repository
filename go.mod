@@ -4,8 +4,8 @@ go 1.24.0
 
 require (
 	github.com/bytedance/sonic v1.13.3
-	github.com/go-redis/redis/v8 v8.11.5
 	github.com/google/uuid v1.6.0
+	github.com/redis/go-redis/v9 v9.14.0
 	github.com/stretchr/testify v1.10.0
 	github.com/testcontainers/testcontainers-go v0.38.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.37.0

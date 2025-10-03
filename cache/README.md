@@ -25,7 +25,7 @@ The caching system consists of three main components:
 
 ```go
 import (
-    "github.com/go-redis/redis/v8"
+    "github.com/redis/go-redis/v9"
     "github.com/ikateclab/gorm-repository/cache"
     gormrepository "github.com/ikateclab/gorm-repository"
 )
@@ -44,10 +44,10 @@ redisClient := redis.NewClient(&redis.Options{
 // Create cache components
 logger := cache.NewSimpleLogger()
 tagCache := cache.NewTagCache(redisClient)
-resourceCache := cache.NewResourceCache(logger, tagCache, "v1.0.0", true) // debug enabled
+ResourceCache := cache.NewResourceCache(logger, tagCache, "v1.0.0", true) // debug enabled
 
 // Create cached repository
-userRepo := cache.NewCachedGormRepository[*User](db, resourceCache, "v1.0.0", true)
+userRepo := cache.NewCachedGormRepository[*User](db, ResourceCache, "v1.0.0", true)
 ```
 
 ### 3. Define Your Entity

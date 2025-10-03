@@ -15,23 +15,23 @@ import (
 // CachedGormRepository extends GormRepository with caching capabilities
 type CachedGormRepository[T any] struct {
 	*gormrepository.GormRepository[T]
-	cache           ResourceCache
+	cache           ResourceCacheInterface
 	dbSchemaVersion string
 	debugEnabled    bool
 }
 
 // NewCachedGormRepository creates a new cached repository
-func NewCachedGormRepository[T any](db *gorm.DB, resourceCache *resourceCache, dbSchemaVersion string, debugEnabled bool) *CachedGormRepository[T] {
+func NewCachedGormRepository[T any](db *gorm.DB, ResourceCache *ResourceCache, dbSchemaVersion string, debugEnabled bool) *CachedGormRepository[T] {
 	return &CachedGormRepository[T]{
 		GormRepository:  gormrepository.NewGormRepository[T](db),
-		cache:           resourceCache,
+		cache:           ResourceCache,
 		dbSchemaVersion: dbSchemaVersion,
 		debugEnabled:    debugEnabled,
 	}
 }
 
 // NewCachedGormRepositoryWithCache creates a new cached repository with a custom cache interface
-func NewCachedGormRepositoryWithCache[T any](db *gorm.DB, cache ResourceCache, dbSchemaVersion string, debugEnabled bool) *CachedGormRepository[T] {
+func NewCachedGormRepositoryWithCache[T any](db *gorm.DB, cache ResourceCacheInterface, dbSchemaVersion string, debugEnabled bool) *CachedGormRepository[T] {
 	return &CachedGormRepository[T]{
 		GormRepository:  gormrepository.NewGormRepository[T](db),
 		cache:           cache,
@@ -314,10 +314,24 @@ func (r *CachedGormRepository[T]) FindPaginated(ctx context.Context, page int, p
 }
 
 func (r *CachedGormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options ...gormrepository.Option) (*T, error) {
+	optionsCopy := make([]gormrepository.Option, len(options))
+	copy(optionsCopy, options)
+
 	query := r.optionsToQuery(options)
 	idStr := id.String()
 
 	cacheKey := []interface{}{r.getResourceName(), idStr, r.parseQueryToKey(query)}
+
+	rememberOptions := &RememberOptions{}
+
+	tx := func() *gormrepository.Tx {
+		db := r.applyOptionsToGetDB(optionsCopy)
+		return gormrepository.GetTransactionFromDB(db)
+	}()
+
+	if tx != nil && tx.TransactionCacheInvalid {
+		rememberOptions.SkipCache = true
+	}
 
 	result, err := r.cache.Remember(
 		ctx,
@@ -328,7 +342,7 @@ func (r *CachedGormRepository[T]) FindById(ctx context.Context, id uuid.UUID, op
 		func(value interface{}) ([]RawTag, error) {
 			return r.buildSingleTagsFromDataAndQuery(idStr, value, query), nil
 		},
-		nil,
+		rememberOptions,
 	)
 
 	if err != nil {
@@ -536,6 +550,7 @@ func (r *CachedGormRepository[T]) handleCacheInvalidation(ctx context.Context, o
 	// Check for transaction context
 	tx := gormrepository.GetTransactionFromDB(db)
 	if tx != nil {
+		tx.TransactionCacheInvalid = true
 		// Queue the operation to be executed on commit
 		tx.QueueCacheOperation(operation)
 		return nil
@@ -595,67 +610,66 @@ func (r *CachedGormRepository[T]) logDebug(message string) {
 	}
 }
 
-// Helper to convert options to query map for caching
 func (r *CachedGormRepository[T]) optionsToQuery(options []gormrepository.Option) map[string]interface{} {
 	query := make(map[string]interface{})
 
-	// Create a temporary DB instance to extract query information
-	tempDB := r.GetDB().Session(&gorm.Session{DryRun: true})
+	// Crie um DB "seco" só para aplicar as opções
+	tempDB := r.GetDB() //.Session(&gorm.Session{DryRun: true})
 
-	// Apply all options to extract the final query
 	for _, option := range options {
 		if option != nil {
 			tempDB = option(tempDB)
 		}
 	}
 
-	// Create a dummy entity to trigger query building
-	var entity T
-	stmt := tempDB.Find(&entity).Statement
+	// Em vez de Find, apenas obtenha Statement
+	stmt := &gorm.Statement{DB: tempDB}
+	_ = stmt.Parse(new(T)) // parse apenas o schema do model
 
-	// Extract basic query components for cache key generation
-	if stmt.SQL.String() != "" {
-		query["sql"] = stmt.SQL.String()
-	}
-
-	if len(stmt.Vars) > 0 {
-		// Convert vars to strings for consistent hashing
-		vars := make([]string, len(stmt.Vars))
-		for i, v := range stmt.Vars {
-			vars[i] = fmt.Sprintf("%v", v)
-		}
-		query["vars"] = vars
-	}
-
-	if stmt.Table != "" {
-		query["table"] = stmt.Table
-	}
-
-	if len(stmt.Selects) > 0 {
-		query["selects"] = stmt.Selects
-	}
-
-	if len(stmt.Omits) > 0 {
-		query["omits"] = stmt.Omits
-	}
-
-	if len(stmt.Joins) > 0 {
-		joins := make([]string, len(stmt.Joins))
-		for i, join := range stmt.Joins {
-			joins[i] = join.Name
-		}
-		query["joins"] = joins
-	}
-
-	if len(stmt.Preloads) > 0 {
-		preloads := make([]string, 0, len(stmt.Preloads))
-		for key := range stmt.Preloads {
+	// Extraia apenas os componentes relevantes
+	// Preloads (relations)
+	if len(tempDB.Statement.Preloads) > 0 {
+		preloads := make([]string, 0, len(tempDB.Statement.Preloads))
+		for key := range tempDB.Statement.Preloads {
 			preloads = append(preloads, key)
 		}
 		query["preloads"] = preloads
 	}
 
-	// Add a simple hash of the options themselves as fallback
+	// Joins (relations)
+	if len(tempDB.Statement.Joins) > 0 {
+		joins := make([]string, len(tempDB.Statement.Joins))
+		for i, join := range tempDB.Statement.Joins {
+			joins[i] = join.Name
+		}
+		query["joins"] = joins
+	}
+
+	// Selects (campos selecionados)
+	if len(tempDB.Statement.Selects) > 0 {
+		query["selects"] = tempDB.Statement.Selects
+	}
+
+	// Omits (campos omitidos)
+	if len(tempDB.Statement.Omits) > 0 {
+		query["omits"] = tempDB.Statement.Omits
+	}
+
+	// Table name
+	if tempDB.Statement.Table != "" {
+		query["table"] = tempDB.Statement.Table
+	}
+
+	// Vars (binds)
+	if len(tempDB.Statement.Vars) > 0 {
+		vars := make([]string, len(tempDB.Statement.Vars))
+		for i, v := range tempDB.Statement.Vars {
+			vars[i] = fmt.Sprintf("%v", v)
+		}
+		query["vars"] = vars
+	}
+
+	// Adicione um hash simples das opções para fallback
 	if len(options) > 0 {
 		query["options_count"] = len(options)
 	}

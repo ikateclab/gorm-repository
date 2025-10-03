@@ -74,10 +74,27 @@ func NewGormRepository[T any](db *gorm.DB) *GormRepository[T] {
 	}
 }
 
-func WithRelations(relations ...string) Option {
+type RelationOption struct {
+	Name     string
+	Callback func(*gorm.DB) *gorm.DB
+}
+
+// Nova versão, aceita: WithRelations("Departments") ou WithRelations(RelationOption{Name: "Departments", Callback: ...})
+func WithRelations(relations ...interface{}) Option {
 	return func(db *gorm.DB) *gorm.DB {
-		for _, relation := range relations {
-			db = db.Preload(relation)
+		for _, rel := range relations {
+			switch v := rel.(type) {
+			case string:
+				db = db.Preload(v)
+			case RelationOption:
+				if v.Callback != nil {
+					db = db.Preload(v.Name, v.Callback)
+				} else {
+					db = db.Preload(v.Name)
+				}
+			default:
+				// ignora tipos inválidos
+			}
 		}
 		return db
 	}
@@ -391,9 +408,10 @@ func WithQueryStruct(query map[string]interface{}) Option {
 }
 
 type Tx struct {
-	gtx        *gorm.DB
-	committed  bool
-	rolledBack bool
+	gtx                     *gorm.DB
+	TransactionCacheInvalid bool // if true, no cache operations will be performed within this transaction
+	committed               bool
+	rolledBack              bool
 	// clonedEntities stores cloned entities as snapshots during transaction
 	// key is a unique identifier for the entity, value is the cloned entity snapshot
 	clonedEntities map[string]interface{}
@@ -404,9 +422,12 @@ type Tx struct {
 
 // BeginTransaction starts a nested transaction
 func (tx *Tx) BeginTransaction() *Tx {
-	gtx := tx.gtx.Begin()
+	if tx.gtx != nil {
+		return tx
+	}
+
 	return &Tx{
-		gtx:            gtx,
+		gtx:            tx.gtx.Begin(),
 		committed:      false,
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),

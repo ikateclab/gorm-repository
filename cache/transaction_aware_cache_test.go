@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -80,7 +80,7 @@ func setupTransactionTestDB(t *testing.T) (*gorm.DB, func()) {
 	return db, cleanup
 }
 
-func setupTransactionTestCache(t *testing.T) (*resourceCache, *redis.Client, func()) {
+func setupTransactionTestCache(t *testing.T) (*ResourceCache, *redis.Client, func()) {
 	ctx := context.Background()
 
 	// Start Redis test container
@@ -189,7 +189,7 @@ func TestCachedGormRepository_TransactionCommit_InvalidatesCache(t *testing.T) {
 	require.NoError(t, err, "Direct DB read should succeed after transaction")
 	t.Logf("Database user name after transaction: %s", dbUser.Name)
 
-	freshUser, err := repo.FindById(ctx, user.Id)
+	freshUser, err := repo.FindById(ctx, user.Id, gormrepository.WithTx(tx))
 	require.NoError(t, err, "FindById after commit should succeed")
 	require.NotNil(t, freshUser, "Fresh user should not be nil")
 	if freshUser != nil {

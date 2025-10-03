@@ -23,7 +23,7 @@ func NewSimpleLogger() *SimpleLogger {
 }
 
 // ResourceCache defines the interface for cache operations
-type ResourceCache interface {
+type ResourceCacheInterface interface {
 	Remember(
 		ctx context.Context,
 		rawKey RawKey,
@@ -34,8 +34,8 @@ type ResourceCache interface {
 	ForgetByTags(ctx context.Context, rawTags []RawTag) error
 }
 
-// resourceCache is the main cache interface
-type resourceCache struct {
+// ResourceCache is the main cache interface
+type ResourceCache struct {
 	logger          Logger
 	tagCache        *TagCache
 	dbSchemaVersion string
@@ -48,9 +48,9 @@ type resourceCache struct {
 	maxTimeout int
 }
 
-// NewResourceCache creates a new resourceCache instance
-func NewResourceCache(logger Logger, tagCache *TagCache, dbSchemaVersion string, debugEnabled bool) *resourceCache {
-	return &resourceCache{
+// NewResourceCache creates a new ResourceCache instance
+func NewResourceCache(logger Logger, tagCache *TagCache, dbSchemaVersion string, debugEnabled bool) *ResourceCache {
+	return &ResourceCache{
 		logger:          logger,
 		tagCache:        tagCache,
 		dbSchemaVersion: dbSchemaVersion,
@@ -61,7 +61,7 @@ func NewResourceCache(logger Logger, tagCache *TagCache, dbSchemaVersion string,
 }
 
 // PrepareKey creates a cache key from raw key input
-func (rc *resourceCache) PrepareKey(rawKey RawKey, dontHashKey bool) string {
+func (rc *ResourceCache) PrepareKey(rawKey RawKey, dontHashKey bool) string {
 	dbVersion := rc.dbSchemaVersion
 
 	var stringKey string
@@ -93,7 +93,7 @@ func (rc *resourceCache) PrepareKey(rawKey RawKey, dontHashKey bool) string {
 }
 
 // PrepareTag creates a cache tag from raw tag input
-func (rc *resourceCache) PrepareTag(rawTag RawTag) string {
+func (rc *ResourceCache) PrepareTag(rawTag RawTag) string {
 	dbVersion := rc.dbSchemaVersion
 
 	var stringTag string
@@ -104,9 +104,7 @@ func (rc *resourceCache) PrepareTag(rawTag RawTag) string {
 		stringTag = string(jsonBytes)
 	}
 
-	// Hash the tag with MD5 like the original Node.js implementation
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(stringTag)))
-	return fmt.Sprintf("%s:%s", dbVersion, hash)
+	return fmt.Sprintf("%s:%s", dbVersion, stringTag)
 }
 
 // SetOptions represents options for Set operation
@@ -116,7 +114,7 @@ type SetOptions struct {
 }
 
 // Set stores a value with tags
-func (rc *resourceCache) Set(ctx context.Context, rawKey RawKey, value interface{}, rawTags []RawTag, options *SetOptions) error {
+func (rc *ResourceCache) Set(ctx context.Context, rawKey RawKey, value interface{}, rawTags []RawTag, options *SetOptions) error {
 	if options == nil {
 		options = &SetOptions{}
 	}
@@ -142,7 +140,7 @@ func (rc *resourceCache) Set(ctx context.Context, rawKey RawKey, value interface
 }
 
 // Get retrieves a cached value
-func (rc *resourceCache) Get(ctx context.Context, rawKey RawKey) (interface{}, error) {
+func (rc *ResourceCache) Get(ctx context.Context, rawKey RawKey) (interface{}, error) {
 	key := rc.PrepareKey(rawKey, false)
 	results, err := rc.tagCache.Get(ctx, key)
 	if err != nil {
@@ -165,10 +163,11 @@ func (rc *resourceCache) Get(ctx context.Context, rawKey RawKey) (interface{}, e
 type RememberOptions struct {
 	DontHashKey bool
 	Timeout     *int
+	SkipCache   bool
 }
 
 // Remember implements the cache-aside pattern
-func (rc *resourceCache) Remember(
+func (rc *ResourceCache) Remember(
 	ctx context.Context,
 	rawKey RawKey,
 	getValue func() (interface{}, error),
@@ -185,18 +184,20 @@ func (rc *resourceCache) Remember(
 
 	key := rc.PrepareKey(rawKey, options.DontHashKey)
 
-	// Try to get from cache first
-	cacheValue, err := rc.Get(ctx, rawKey)
-	if err != nil {
-		return nil, err
-	}
-
-	if cacheValue != nil {
-		if rc.debugEnabled {
-			hitRatio := rc.incrementHitCount()
-			rc.log(fmt.Sprintf("Cache hit: %s. (%.2f hit ratio)", key, hitRatio))
+	if !options.SkipCache {
+		// Try to get from cache first
+		cacheValue, err := rc.Get(ctx, rawKey)
+		if err != nil {
+			return nil, err
 		}
-		return cacheValue, nil
+
+		if cacheValue != nil {
+			if rc.debugEnabled {
+				hitRatio := rc.incrementHitCount()
+				rc.log(fmt.Sprintf("Cache hit: %s. (%.2f hit ratio)", key, hitRatio))
+			}
+			return cacheValue, nil
+		}
 	}
 
 	if rc.debugEnabled {
@@ -257,7 +258,7 @@ func (rc *resourceCache) Remember(
 }
 
 // ForgetByTags invalidates cache entries by tags
-func (rc *resourceCache) ForgetByTags(ctx context.Context, rawTags []RawTag) error {
+func (rc *ResourceCache) ForgetByTags(ctx context.Context, rawTags []RawTag) error {
 	if !rc.isEnabled() {
 		return nil
 	}
@@ -278,31 +279,31 @@ func (rc *resourceCache) ForgetByTags(ctx context.Context, rawTags []RawTag) err
 	return rc.tagCache.Invalidate(ctx, tags...)
 }
 
-func (rc *resourceCache) getRandomTimeout() int {
+func (rc *ResourceCache) getRandomTimeout() int {
 	return rand.Intn(rc.maxTimeout-rc.minTimeout) + rc.minTimeout
 }
 
-func (rc *resourceCache) isEnabled() bool {
+func (rc *ResourceCache) isEnabled() bool {
 	// You can implement this based on your config
 	return true
 	// return rc.config.Get("resourceCacheEnabled").(bool)
 }
 
-func (rc *resourceCache) incrementHitCount() float64 {
+func (rc *ResourceCache) incrementHitCount() float64 {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	rc.hitCount++
 	return rc.getHitRatio()
 }
 
-func (rc *resourceCache) incrementMissCount() float64 {
+func (rc *ResourceCache) incrementMissCount() float64 {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	rc.missCount++
 	return rc.getHitRatio()
 }
 
-func (rc *resourceCache) getHitRatio() float64 {
+func (rc *ResourceCache) getHitRatio() float64 {
 	total := rc.hitCount + rc.missCount
 	if total == 0 {
 		return 0
@@ -310,13 +311,13 @@ func (rc *resourceCache) getHitRatio() float64 {
 	return float64(rc.hitCount) / float64(total)
 }
 
-func (rc *resourceCache) log(message string) {
+func (rc *ResourceCache) log(message string) {
 	if !rc.debugEnabled {
 		return
 	}
 	if rc.logger != nil {
 		rc.logger.Log(message)
 	} else {
-		fmt.Printf("[resourceCache] %s\n", message)
+		fmt.Printf("[ResourceCache] %s\n", message)
 	}
 }
