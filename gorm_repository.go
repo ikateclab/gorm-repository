@@ -17,6 +17,50 @@ const (
 	txContextKey = "__tx"
 )
 
+// TransactionCacheManager manages cache operations that should be executed on transaction commit
+type TransactionCacheManager struct {
+	pendingOperations []func(context.Context) error
+	mutex             sync.RWMutex
+}
+
+// NewTransactionCacheManager creates a new cache manager for transactions
+func NewTransactionCacheManager() *TransactionCacheManager {
+	return &TransactionCacheManager{
+		pendingOperations: make([]func(context.Context) error, 0),
+	}
+}
+
+// QueueOperation adds a cache operation to be executed on commit
+func (tcm *TransactionCacheManager) QueueOperation(operation func(context.Context) error) {
+	tcm.mutex.Lock()
+	defer tcm.mutex.Unlock()
+	tcm.pendingOperations = append(tcm.pendingOperations, operation)
+}
+
+// ExecuteOnCommit executes all queued cache operations
+func (tcm *TransactionCacheManager) ExecuteOnCommit(ctx context.Context) {
+	tcm.mutex.Lock()
+	defer tcm.mutex.Unlock()
+
+	for _, operation := range tcm.pendingOperations {
+		if err := operation(ctx); err != nil {
+			// Log error but don't fail the transaction
+			// You might want to use your logging framework here
+			fmt.Printf("[TransactionCache] Failed to execute cache operation: %v\n", err)
+		}
+	}
+
+	// Clear operations after execution
+	tcm.pendingOperations = tcm.pendingOperations[:0]
+}
+
+// ClearOnRollback clears all queued operations without executing them
+func (tcm *TransactionCacheManager) ClearOnRollback() {
+	tcm.mutex.Lock()
+	defer tcm.mutex.Unlock()
+	tcm.pendingOperations = tcm.pendingOperations[:0]
+}
+
 type GormRepository[T any] struct {
 	Repository[T]
 	DB *gorm.DB
@@ -30,10 +74,27 @@ func NewGormRepository[T any](db *gorm.DB) *GormRepository[T] {
 	}
 }
 
-func WithRelations(relations ...string) Option {
+type RelationOption struct {
+	Name     string
+	Callback func(*gorm.DB) *gorm.DB
+}
+
+// Nova versão, aceita: WithRelations("Departments") ou WithRelations(RelationOption{Name: "Departments", Callback: ...})
+func WithRelations(relations ...interface{}) Option {
 	return func(db *gorm.DB) *gorm.DB {
-		for _, relation := range relations {
-			db = db.Preload(relation)
+		for _, rel := range relations {
+			switch v := rel.(type) {
+			case string:
+				db = db.Preload(v)
+			case RelationOption:
+				if v.Callback != nil {
+					db = db.Preload(v.Name, v.Callback)
+				} else {
+					db = db.Preload(v.Name)
+				}
+			default:
+				// ignora tipos inválidos
+			}
 		}
 		return db
 	}
@@ -46,6 +107,22 @@ func applyOptions(db *gorm.DB, options []Option) *gorm.DB {
 		}
 	}
 	return db
+}
+
+// GetTransactionFromDB extracts the transaction from a GORM DB instance if present
+// This function is used by the cache package to detect transaction context
+func GetTransactionFromDB(db *gorm.DB) *Tx {
+	txInterface, exists := db.Get(txContextKey)
+	if !exists {
+		return nil
+	}
+
+	tx, ok := txInterface.(*Tx)
+	if !ok {
+		return nil
+	}
+
+	return tx
 }
 
 func newEntity[T any]() T {
@@ -304,6 +381,7 @@ func (r *GormRepository[T]) BeginTransaction() *Tx {
 		committed:      false,
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
+		cacheManager:   NewTransactionCacheManager(),
 	}
 }
 
@@ -330,27 +408,34 @@ func WithQueryStruct(query map[string]interface{}) Option {
 }
 
 type Tx struct {
-	gtx        *gorm.DB
-	committed  bool
-	rolledBack bool
+	gtx                     *gorm.DB
+	TransactionCacheInvalid bool // if true, no cache operations will be performed within this transaction
+	committed               bool
+	rolledBack              bool
 	// clonedEntities stores cloned entities as snapshots during transaction
 	// key is a unique identifier for the entity, value is the cloned entity snapshot
 	clonedEntities map[string]interface{}
-	mutex          sync.RWMutex
+	// cacheManager handles cache operations that should be executed on commit
+	cacheManager *TransactionCacheManager
+	mutex        sync.RWMutex
 }
 
 // BeginTransaction starts a nested transaction
 func (tx *Tx) BeginTransaction() *Tx {
-	gtx := tx.gtx.Begin()
+	if tx.gtx != nil {
+		return tx
+	}
+
 	return &Tx{
-		gtx:            gtx,
+		gtx:            tx.gtx.Begin(),
 		committed:      false,
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
+		cacheManager:   NewTransactionCacheManager(),
 	}
 }
 
-// Commit commits the transaction
+// Commit commits the transaction and executes queued cache operations
 func (tx *Tx) Commit() error {
 	if tx.committed || tx.rolledBack {
 		return nil
@@ -359,11 +444,14 @@ func (tx *Tx) Commit() error {
 	err := tx.gtx.Commit().Error
 	if err == nil {
 		tx.committed = true
+		// Execute queued cache operations after successful commit
+		ctx := context.Background()
+		tx.cacheManager.ExecuteOnCommit(ctx)
 	}
 	return err
 }
 
-// Rollback rolls back the transaction
+// Rollback rolls back the transaction and clears queued cache operations
 func (tx *Tx) Rollback() error {
 	if tx.committed || tx.rolledBack {
 		return nil
@@ -372,6 +460,8 @@ func (tx *Tx) Rollback() error {
 	err := tx.gtx.Rollback().Error
 	if err == nil {
 		tx.rolledBack = true
+		// Clear queued cache operations without executing them
+		tx.cacheManager.ClearOnRollback()
 	}
 	return err
 }
@@ -380,19 +470,20 @@ func (tx *Tx) Rollback() error {
 // Usage: defer tx.Finish(&err)
 // Use this for simple cases where you don't need complex error handling
 // Will commit if err is nil, rollback if err is set
+// Cache operations are handled automatically by Commit/Rollback
 func (tx *Tx) Finish(err *error) {
 	if tx.committed || tx.rolledBack {
 		return
 	}
 
 	if *err != nil {
-		// If there was an error, rollback
+		// If there was an error, rollback (clears cache operations)
 		if rollbackErr := tx.Rollback(); rollbackErr != nil {
 			// Log rollback error but don't override the original error
 			// You might want to use your logging framework here
 		}
 	} else {
-		// If no error, commit
+		// If no error, commit (executes cache operations)
 		if commitErr := tx.Commit(); commitErr != nil {
 			*err = commitErr
 		}
@@ -402,6 +493,22 @@ func (tx *Tx) Finish(err *error) {
 // Error returns any error from the underlying GORM transaction
 func (tx *Tx) Error() error {
 	return tx.gtx.Error
+}
+
+// QueueCacheOperation queues a cache operation to be executed on commit
+// This method is used by the cache package to defer cache operations until transaction commit
+func (tx *Tx) QueueCacheOperation(operation func(context.Context) error) {
+	tx.cacheManager.QueueOperation(operation)
+}
+
+// IsCommitted returns true if the transaction has been committed
+func (tx *Tx) IsCommitted() bool {
+	return tx.committed
+}
+
+// IsRolledBack returns true if the transaction has been rolled back
+func (tx *Tx) IsRolledBack() bool {
+	return tx.rolledBack
 }
 
 // storeClonedEntity stores the original entity before cloning
