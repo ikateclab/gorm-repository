@@ -2,13 +2,17 @@ package gormrepository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 
 	"github.com/ikateclab/gorm-repository/utils"
 )
@@ -16,6 +20,9 @@ import (
 const (
 	txContextKey = "__tx"
 )
+
+// Global cache for JSON column types to avoid repeated database queries
+var jsonColumnTypeCache sync.Map
 
 type GormRepository[T any] struct {
 	Repository[T]
@@ -208,7 +215,10 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 		return nil // No changes
 	}
 
-	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	// Process the diff to handle flattened JSONB paths (dot notation)
+	processedDiff := processJSONBDiff(db, entity, diff)
+
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(processedDiff).Error
 }
 
 func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID, entity *T, updateFunc func(), options ...Option) error {
@@ -232,8 +242,11 @@ func (r *GormRepository[T]) UpdateByIdInPlace(ctx context.Context, id uuid.UUID,
 		return nil
 	}
 
-	// Perform the update using the diff and return the updated entity
-	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(diff).Error
+	// Process the diff to handle flattened JSONB paths (dot notation)
+	processedDiff := processJSONBDiff(db, entity, diff)
+
+	// Perform the update using the processed diff and return the updated entity
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(processedDiff).Error
 }
 
 func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, updateFunc func(), options ...Option) error {
@@ -257,8 +270,11 @@ func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, update
 		return nil
 	}
 
-	// Perform the update using the diff - GORM will extract the primary key from the entity
-	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Updates(diff).Error
+	// Process the diff to handle flattened JSONB paths (dot notation)
+	processedDiff := processJSONBDiff(db, entity, diff)
+
+	// Perform the update using the processed diff - GORM will extract the primary key from the entity
+	return db.Model(entity).Omit(clause.Associations).Clauses(clause.Returning{}).Updates(processedDiff).Error
 }
 
 func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error {
@@ -464,4 +480,179 @@ func storeCloneIfInTransaction[T any](db *gorm.DB, entity *T) {
 	entityKey := generateEntityKey(entity)
 	clone := cloneable.Clone()
 	tx.storeClonedEntity(entityKey, clone)
+}
+
+// getJSONColumnType detects if a column is 'json' or 'jsonb' type in PostgreSQL
+// Returns "jsonb" for jsonb columns, "json" for json columns, or empty string if unable to determine
+// Uses a cache to avoid repeated database queries for the same table.column combinations
+func getJSONColumnType(db *gorm.DB, tableName string, columnName string) string {
+	// Create cache key
+	cacheKey := fmt.Sprintf("%s.%s", tableName, columnName)
+
+	// Check cache first
+	if cached, ok := jsonColumnTypeCache.Load(cacheKey); ok {
+		return cached.(string)
+	}
+
+	var columnType string
+
+	// Query PostgreSQL information_schema to get the column data type
+	err := db.Raw(`
+		SELECT data_type
+		FROM information_schema.columns
+		WHERE table_name = ? AND column_name = ?
+	`, tableName, columnName).Scan(&columnType).Error
+
+	if err != nil {
+		// If we can't determine, default to jsonb for safety (more feature-rich)
+		columnType = "jsonb"
+	} else if columnType != "json" && columnType != "jsonb" {
+		// If it's neither json nor jsonb, default to jsonb
+		columnType = "jsonb"
+	}
+
+	// Store in cache for future use
+	jsonColumnTypeCache.Store(cacheKey, columnType)
+
+	return columnType
+}
+
+// processJSONBDiff processes a diff map and converts flattened JSONB paths (dot notation)
+// into jsonb_set expressions for PostgreSQL
+func processJSONBDiff(db *gorm.DB, model interface{}, diff map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	grouped := make(map[string]map[string]interface{})
+
+	// Get schema from the model
+	stmt := &gorm.Statement{DB: db}
+	stmt.Parse(model)
+
+	// Group flattened paths by their root field name
+	for key, value := range diff {
+		if strings.Contains(key, ".") {
+			// This is a flattened JSONB path like "status.mode" or "status.state.code"
+			parts := strings.SplitN(key, ".", 2)
+			fieldName := parts[0] // e.g., "status"
+			subPath := parts[1]   // e.g., "mode" or "state.code"
+
+			if grouped[fieldName] == nil {
+				grouped[fieldName] = make(map[string]interface{})
+			}
+			grouped[fieldName][subPath] = value
+		} else {
+			// Regular field (not a flattened JSONB path)
+			result[key] = value
+		}
+	}
+
+	// Convert grouped paths into jsonb_set expressions
+	for fieldName, paths := range grouped {
+		// Get the field to find the actual struct field name (PascalCase)
+		field := stmt.Schema.LookUpField(fieldName)
+		if field == nil && len(fieldName) > 0 {
+			// Try capitalizing the first letter (camelCase -> PascalCase)
+			pascalCase := strings.ToUpper(fieldName[:1]) + fieldName[1:]
+			field = stmt.Schema.LookUpField(pascalCase)
+		}
+
+		// Use the struct field name (PascalCase) as the key in the result map
+		// GORM will handle the conversion to column name
+		var resultKey string
+		if field != nil {
+			resultKey = field.Name // Use the struct field name (e.g., "WhatsAppData")
+		} else {
+			resultKey = fieldName // Fallback to the original field name
+		}
+
+		result[resultKey] = buildJSONBSetExpression(db, stmt.Schema, fieldName, paths)
+	}
+
+	return result
+}
+
+// buildJSONBSetExpression constructs a nested jsonb_set expression for PostgreSQL
+// to update multiple paths within a JSONB column
+func buildJSONBSetExpression(db *gorm.DB, schema *schema.Schema, fieldName string, paths map[string]interface{}) clause.Expr {
+	// Get the field from the schema to find the actual column name
+	// Try both camelCase and PascalCase versions
+	field := schema.LookUpField(fieldName)
+	if field == nil && len(fieldName) > 0 {
+		// Try capitalizing the first letter (camelCase -> PascalCase)
+		pascalCase := strings.ToUpper(fieldName[:1]) + fieldName[1:]
+		field = schema.LookUpField(pascalCase)
+	}
+
+	var columnName string
+	if field != nil {
+		columnName = field.DBName
+	} else {
+		// Fallback: use the field name as-is
+		columnName = fieldName
+	}
+	columnType := getJSONColumnType(db, schema.Table, columnName)
+
+	// Start with the original column value (or empty object if NULL)
+	expr := fmt.Sprintf("COALESCE(?::%s, '{}'::jsonb)", columnType)
+	args := []interface{}{clause.Column{Name: columnName}}
+
+	// Sort paths for consistent ordering
+	sortedPaths := make([]string, 0, len(paths))
+	for path := range paths {
+		sortedPaths = append(sortedPaths, path)
+	}
+	sort.Strings(sortedPaths)
+
+	// Build nested jsonb_set calls for each path
+	for _, path := range sortedPaths {
+		value := paths[path]
+
+		// Convert "mode" or "state.code" to PostgreSQL array format
+		// "mode" -> {mode}
+		// "state.code" -> {state,code}
+		pathParts := strings.Split(path, ".")
+		pathArray := "{" + strings.Join(pathParts, ",") + "}"
+
+		// Serialize value to JSON
+		valueJSON, err := json.Marshal(value)
+		if err != nil {
+			// Skip this path if we can't marshal the value
+			continue
+		}
+
+		// Nest another jsonb_set call
+		expr = fmt.Sprintf("jsonb_set(%s, '%s', ?::jsonb)", expr, pathArray)
+		args = append(args, string(valueJSON))
+	}
+
+	return gorm.Expr(expr, args...)
+}
+
+// getTableNameFromDB extracts the table name from the GORM DB statement
+func getTableNameFromDB(db *gorm.DB) string {
+	if db.Statement != nil && db.Statement.Table != "" {
+		return db.Statement.Table
+	}
+
+	// Fallback: try to parse from the model
+	if db.Statement != nil && db.Statement.Model != nil {
+		stmt := &gorm.Statement{DB: db}
+		stmt.Parse(db.Statement.Model)
+		return stmt.Table
+	}
+
+	return ""
+}
+
+// BuildJSONMergeExpr builds a PostgreSQL JSON merge expression with proper type casting
+// Uses the column's actual type (json or jsonb) to avoid type mismatch errors
+func BuildJSONMergeExpr(db *gorm.DB, tableName string, columnName string, jsonValue string) clause.Expr {
+	columnType := getJSONColumnType(db, tableName, columnName)
+
+	// Build the merge expression with proper casting based on detected type
+	// COALESCE ensures we handle NULL values properly
+	return gorm.Expr(
+		fmt.Sprintf("COALESCE(?::%s, '{}'::jsonb) || ?::jsonb", columnType),
+		clause.Column{Name: columnName},
+		jsonValue,
+	)
 }

@@ -61,12 +61,16 @@ func (new *TestUserBuilder) Diff(old *TestUserBuilder) map[string]interface{} {
 	// Pointer to struct comparison
 	if new.user == nil || old.user == nil {
 		if new.user != old.user {
+
 			diff["user"] = new.user
+
 		}
 	} else {
 		nestedDiff := new.user.Diff(old.user)
 		if len(nestedDiff) > 0 {
+
 			diff["user"] = nestedDiff
+
 		}
 	}
 
@@ -90,12 +94,16 @@ func (new *TestProfileBuilder) Diff(old *TestProfileBuilder) map[string]interfac
 	// Pointer to struct comparison
 	if new.profile == nil || old.profile == nil {
 		if new.profile != old.profile {
+
 			diff["profile"] = new.profile
+
 		}
 	} else {
 		nestedDiff := new.profile.Diff(old.profile)
 		if len(nestedDiff) > 0 {
+
 			diff["profile"] = nestedDiff
+
 		}
 	}
 
@@ -119,12 +127,16 @@ func (new *TestPostBuilder) Diff(old *TestPostBuilder) map[string]interface{} {
 	// Pointer to struct comparison
 	if new.post == nil || old.post == nil {
 		if new.post != old.post {
+
 			diff["post"] = new.post
+
 		}
 	} else {
 		nestedDiff := new.post.Diff(old.post)
 		if len(nestedDiff) > 0 {
+
 			diff["post"] = nestedDiff
+
 		}
 	}
 
@@ -162,6 +174,128 @@ func (new *UserData) Diff(old *UserData) map[string]interface{} {
 	// Simple type comparison
 	if new.Married != old.Married {
 		diff["married"] = new.Married
+	}
+
+	return diff
+}
+
+// Diff compares this WhatsAppStatus instance (new) with another (old) and returns a map of differences
+// with only the new values for fields that have changed.
+// Usage: newValues = new.Diff(old)
+// Returns nil if either pointer is nil.
+func (new *WhatsAppStatus) Diff(old *WhatsAppStatus) map[string]interface{} {
+	// Handle nil pointers
+	if new == nil || old == nil {
+		return nil
+	}
+
+	diff := make(map[string]interface{})
+
+	// Compare Mode
+
+	// Simple type comparison
+	if new.Mode != old.Mode {
+		diff["mode"] = new.Mode
+	}
+
+	// Compare State
+
+	// Simple type comparison
+	if new.State != old.State {
+		diff["state"] = new.State
+	}
+
+	// Compare IsStarted
+
+	// Simple type comparison
+	if new.IsStarted != old.IsStarted {
+		diff["isStarted"] = new.IsStarted
+	}
+
+	// Compare WaVersion
+
+	// Simple type comparison
+	if new.WaVersion != old.WaVersion {
+		diff["waVersion"] = new.WaVersion
+	}
+
+	// Compare IsOnQrPage
+
+	// Simple type comparison
+	if new.IsOnQrPage != old.IsOnQrPage {
+		diff["isOnQrPage"] = new.IsOnQrPage
+	}
+
+	// Compare IsWebConnected
+
+	// Simple type comparison
+	if new.IsWebConnected != old.IsWebConnected {
+		diff["isWebConnected"] = new.IsWebConnected
+	}
+
+	// Compare QrCodeExpiresAt
+
+	// Simple type comparison
+	if new.QrCodeExpiresAt != old.QrCodeExpiresAt {
+		diff["qrCodeExpiresAt"] = new.QrCodeExpiresAt
+	}
+
+	// Compare QrCodeUrl
+
+	// Simple type comparison
+	if new.QrCodeUrl != old.QrCodeUrl {
+		diff["qrCodeUrl"] = new.QrCodeUrl
+	}
+
+	return diff
+}
+
+// Diff compares this WhatsAppData instance (new) with another (old) and returns a map of differences
+// with only the new values for fields that have changed.
+// Usage: newValues = new.Diff(old)
+// Returns nil if either pointer is nil.
+func (new *WhatsAppData) Diff(old *WhatsAppData) map[string]interface{} {
+	// Handle nil pointers
+	if new == nil || old == nil {
+		return nil
+	}
+
+	diff := make(map[string]interface{})
+
+	// Compare Error
+
+	// Simple type comparison
+	if new.Error != old.Error {
+		diff["error"] = new.Error
+	}
+
+	// Compare Status
+
+	// Pointer to struct comparison
+	if new.Status == nil || old.Status == nil {
+		if new.Status != old.Status {
+
+			// For JSONB nested struct, setting to nil should set the entire field to null
+			diff["status"] = new.Status
+
+		}
+	} else {
+		nestedDiff := new.Status.Diff(old.Status)
+		if len(nestedDiff) > 0 {
+
+			// Flatten nested JSONB struct diffs with dot notation for proper jsonb_set paths
+			for key, value := range nestedDiff {
+				diff["status."+key] = value
+			}
+
+		}
+	}
+
+	// Compare DriverId
+
+	// Simple type comparison
+	if new.DriverId != old.DriverId {
+		diff["driverId"] = new.DriverId
 	}
 
 	return diff
@@ -230,12 +364,20 @@ func (new *TestUser) Diff(old *TestUser) map[string]interface{} {
 	// Pointer to struct comparison
 	if new.Profile == nil || old.Profile == nil {
 		if new.Profile != old.Profile {
+
+			// For JSONB nested struct, setting to nil should set the entire field to null
 			diff["profile"] = new.Profile
+
 		}
 	} else {
 		nestedDiff := new.Profile.Diff(old.Profile)
 		if len(nestedDiff) > 0 {
-			diff["profile"] = nestedDiff
+
+			// Flatten nested JSONB struct diffs with dot notation for proper jsonb_set paths
+			for key, value := range nestedDiff {
+				diff["profile."+key] = value
+			}
+
 		}
 	}
 
@@ -268,12 +410,78 @@ func (new *TestUser) Diff(old *TestUser) map[string]interface{} {
 		// Both are not nil - use attribute-by-attribute diff
 		DataDiff := new.Data.Diff(old.Data)
 		if len(DataDiff) > 0 {
-			jsonValue, err := sonic.Marshal(DataDiff)
-			if err == nil && !isEmptyJSON(string(jsonValue)) {
-				diff["data"] = gorm.Expr("? || ?", clause.Column{Name: "data"}, string(jsonValue))
-			} else if err != nil {
-				// Fallback to regular assignment if JSON marshaling fails
-				diff["data"] = new.Data
+			// Check if the diff contains flattened paths (dot notation)
+			hasFlattenedPaths := false
+			for key := range DataDiff {
+				if strings.Contains(key, ".") {
+					hasFlattenedPaths = true
+					break
+				}
+			}
+
+			if hasFlattenedPaths {
+				// Flatten paths at this level too: whatsAppData.status.mode
+				for key, value := range DataDiff {
+					diff["data."+key] = value
+				}
+			} else {
+				// No flattened paths - use traditional || merge
+				jsonValue, err := sonic.Marshal(DataDiff)
+				if err == nil && !isEmptyJSON(string(jsonValue)) {
+					diff["data"] = gorm.Expr("? || ?", clause.Column{Name: "data"}, string(jsonValue))
+				} else if err != nil {
+					// Fallback to regular assignment if JSON marshaling fails
+					diff["data"] = new.Data
+				}
+			}
+		}
+	}
+
+	// Compare WhatsAppData
+
+	// JSON field comparison - handle both datatypes.JSON and struct types with jsonb storage
+
+	// JSON field comparison - attribute-by-attribute diff for struct types
+
+	// Handle pointer to struct
+	if new.WhatsAppData == nil && old.WhatsAppData != nil {
+		// new is nil, old is not nil - set to null
+		diff["whatsAppData"] = nil
+	} else if new.WhatsAppData != nil && old.WhatsAppData == nil {
+		// new is not nil, old is nil - use entire new
+		jsonValue, err := sonic.Marshal(new.WhatsAppData)
+		if err == nil && !isEmptyJSON(string(jsonValue)) {
+			diff["whatsAppData"] = gorm.Expr("? || ?", clause.Column{Name: "whats_app_data"}, string(jsonValue))
+		} else if err != nil {
+			diff["whatsAppData"] = new.WhatsAppData
+		}
+	} else if new.WhatsAppData != nil && old.WhatsAppData != nil {
+		// Both are not nil - use attribute-by-attribute diff
+		WhatsAppDataDiff := new.WhatsAppData.Diff(old.WhatsAppData)
+		if len(WhatsAppDataDiff) > 0 {
+			// Check if the diff contains flattened paths (dot notation)
+			hasFlattenedPaths := false
+			for key := range WhatsAppDataDiff {
+				if strings.Contains(key, ".") {
+					hasFlattenedPaths = true
+					break
+				}
+			}
+
+			if hasFlattenedPaths {
+				// Flatten paths at this level too: whatsAppData.status.mode
+				for key, value := range WhatsAppDataDiff {
+					diff["whatsAppData."+key] = value
+				}
+			} else {
+				// No flattened paths - use traditional || merge
+				jsonValue, err := sonic.Marshal(WhatsAppDataDiff)
+				if err == nil && !isEmptyJSON(string(jsonValue)) {
+					diff["whatsAppData"] = gorm.Expr("? || ?", clause.Column{Name: "whats_app_data"}, string(jsonValue))
+				} else if err != nil {
+					// Fallback to regular assignment if JSON marshaling fails
+					diff["whatsAppData"] = new.WhatsAppData
+				}
 			}
 		}
 	}

@@ -727,6 +727,61 @@ func TestGormRepository_UpdateInPlace_MultipleFields(t *testing.T) {
 }
 
 // Test UpdateByIdInPlace with transaction focusing on boolean false values
+func TestGormRepository_UpdateByIdInPlace_NestedJSONB(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	// Create user with nested JSONB (WhatsAppData)
+	user := createTestUser()
+	user.WhatsAppData = &tests.WhatsAppData{
+		Error: "",
+		Status: &tests.WhatsAppStatus{
+			Mode:            "QR",
+			State:           "NORMAL",
+			IsStarted:       true,
+			WaVersion:       "2.3000.1029001831",
+			IsOnQrPage:      true,
+			IsWebConnected:  true,
+			QrCodeExpiresAt: "2025-10-29T19:13:46.878Z",
+			QrCodeUrl:       "https://example.com/qr-code.png",
+		},
+		DriverId: "a20b69a8-ba35-4d84-83be-933a5544935d",
+	}
+
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Update ONLY the Mode field in the nested Status
+	err = repo.UpdateByIdInPlace(ctx, user.Id, user, func() {
+		user.WhatsAppData.Status.Mode = "CONNECTED"
+	})
+	require.NoError(t, err, "UpdateByIdInPlace should not fail")
+
+	// Verify that ALL fields were preserved
+	updatedUser, err := repo.FindById(ctx, user.Id)
+	require.NoError(t, err, "Failed to find updated user")
+
+	require.NotNil(t, updatedUser.WhatsAppData, "WhatsAppData should not be nil")
+	require.NotNil(t, updatedUser.WhatsAppData.Status, "Status should not be nil")
+
+	// Check that Mode was updated
+	require.Equal(t, "CONNECTED", updatedUser.WhatsAppData.Status.Mode, "Mode should be updated to CONNECTED")
+
+	// Check that ALL other fields were preserved
+	require.Equal(t, "NORMAL", updatedUser.WhatsAppData.Status.State, "State should be preserved")
+	require.Equal(t, true, updatedUser.WhatsAppData.Status.IsStarted, "IsStarted should be preserved")
+	require.Equal(t, "2.3000.1029001831", updatedUser.WhatsAppData.Status.WaVersion, "WaVersion should be preserved")
+	require.Equal(t, true, updatedUser.WhatsAppData.Status.IsOnQrPage, "IsOnQrPage should be preserved")
+	require.Equal(t, true, updatedUser.WhatsAppData.Status.IsWebConnected, "IsWebConnected should be preserved")
+	require.Equal(t, "2025-10-29T19:13:46.878Z", updatedUser.WhatsAppData.Status.QrCodeExpiresAt, "QrCodeExpiresAt should be preserved")
+	require.Equal(t, "https://example.com/qr-code.png", updatedUser.WhatsAppData.Status.QrCodeUrl, "QrCodeUrl should be preserved")
+
+	// Check parent fields
+	require.Equal(t, "", updatedUser.WhatsAppData.Error, "Error should be preserved")
+	require.Equal(t, "a20b69a8-ba35-4d84-83be-933a5544935d", updatedUser.WhatsAppData.DriverId, "DriverId should be preserved")
+}
+
 func TestGormRepository_UpdateByIdInPlace_ZeroValue_WithTransaction(t *testing.T) {
 	db := setupTestDB(t)
 	repo := &GormRepository[tests.TestUser]{DB: db}

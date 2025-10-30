@@ -71,6 +71,33 @@ func (original *UserData) Clone() *UserData {
 	return &clone
 }
 
+// Clone creates a deep copy of the WhatsAppStatus struct
+func (original *WhatsAppStatus) Clone() *WhatsAppStatus {
+	if original == nil {
+		return nil
+	}
+	// Create new instance - all fields are simple types
+	clone := *original
+	return &clone
+}
+
+// Clone creates a deep copy of the WhatsAppData struct
+func (original *WhatsAppData) Clone() *WhatsAppData {
+	if original == nil {
+		return nil
+	}
+	// Create new instance and copy all simple fields
+	clone := *original
+
+	// Only handle JSONB fields that need deep cloning
+
+	if original.Status != nil {
+		clone.Status = original.Status.Clone()
+	}
+
+	return &clone
+}
+
 // Clone creates a deep copy of the TestUser struct
 func (original *TestUser) Clone() *TestUser {
 	if original == nil {
@@ -83,6 +110,10 @@ func (original *TestUser) Clone() *TestUser {
 
 	if original.Data != nil {
 		clone.Data = original.Data.Clone()
+	}
+
+	if original.WhatsAppData != nil {
+		clone.WhatsAppData = original.WhatsAppData.Clone()
 	}
 
 	return &clone

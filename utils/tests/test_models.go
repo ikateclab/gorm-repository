@@ -16,18 +16,38 @@ type UserData struct {
 	Married  bool   `json:"married,omitempty"`
 }
 
+// @jsonb
+type WhatsAppStatus struct {
+	Mode            string `json:"mode,omitempty"`
+	State           string `json:"state,omitempty"`
+	IsStarted       bool   `json:"isStarted,omitempty"`
+	WaVersion       string `json:"waVersion,omitempty"`
+	IsOnQrPage      bool   `json:"isOnQrPage,omitempty"`
+	IsWebConnected  bool   `json:"isWebConnected,omitempty"`
+	QrCodeExpiresAt string `json:"qrCodeExpiresAt,omitempty"`
+	QrCodeUrl       string `json:"qrCodeUrl,omitempty"`
+}
+
+// @jsonb
+type WhatsAppData struct {
+	Error    string          `json:"error,omitempty"`
+	Status   *WhatsAppStatus `json:"status,omitempty"`
+	DriverId string          `json:"driverId,omitempty"`
+}
+
 // TestUser represents a test entity for repository testing
 // @jsonb
 type TestUser struct {
-	Id         uuid.UUID    `gorm:"type:text;primary_key" json:"id"`
-	Name       string       `gorm:"not null" json:"name"`
-	Email      string       `gorm:"unique;not null" json:"email"`
-	Age        int          `json:"age"`
-	Active     bool         `json:"active"`
-	ArchivedAt *time.Time   `gorm:"column:archivedAt;type:timestamptz" json:"archivedAt,omitempty"`
-	Profile    *TestProfile `gorm:"foreignKey:UserId" json:"profile,omitempty"`
-	Posts      []*TestPost  `gorm:"foreignKey:UserId" json:"posts,omitempty"`
-	Data       *UserData    `gorm:"type:jsonb;serializer:json;not null;default:'{}'" json:"data,omitempty"`
+	Id           uuid.UUID     `gorm:"type:text;primary_key" json:"id"`
+	Name         string        `gorm:"not null" json:"name"`
+	Email        string        `gorm:"unique;not null" json:"email"`
+	Age          int           `json:"age"`
+	Active       bool          `json:"active"`
+	ArchivedAt   *time.Time    `gorm:"column:archivedAt;type:timestamptz" json:"archivedAt,omitempty"`
+	Profile      *TestProfile  `gorm:"foreignKey:UserId" json:"profile,omitempty"`
+	Posts        []*TestPost   `gorm:"foreignKey:UserId" json:"posts,omitempty"`
+	Data         *UserData     `gorm:"type:jsonb;serializer:json;not null;default:'{}'" json:"data,omitempty"`
+	WhatsAppData *WhatsAppData `gorm:"type:jsonb;serializer:json" json:"whatsAppData,omitempty"`
 }
 
 // TestProfile represents a user profile for testing relationships
