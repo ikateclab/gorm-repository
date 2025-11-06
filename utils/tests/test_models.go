@@ -7,7 +7,7 @@ import (
 )
 
 /// go :  go run ../../../gorm-tracked-updates/cmd/gorm-gen/main.go -package=.
-//go:generate go run github.com/ikateclab/gorm-tracked-updates/cmd/gorm-gen@v0.0.5 -package=.
+//go:generate go run github.com/ikateclab/gorm-tracked-updates/cmd/gorm-gen@v0.0.6 -package=.
 
 // @jsonb
 type UserData struct {
