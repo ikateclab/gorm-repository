@@ -164,6 +164,70 @@ func TestGormRepository_FindPaginated(t *testing.T) {
 	require.Equal(t, 2, result.LastPage, "Expected last page 2")
 }
 
+func TestGormRepository_Max(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	// Create users with different ages
+	users := []*tests.TestUser{
+		{Id: uuid.New(), Name: "User 1", Email: "user1@example.com", Age: 25, Active: true},
+		{Id: uuid.New(), Name: "User 2", Email: "user2@example.com", Age: 30, Active: true},
+		{Id: uuid.New(), Name: "User 3", Email: "user3@example.com", Age: 45, Active: false},
+		{Id: uuid.New(), Name: "User 4", Email: "user4@example.com", Age: 20, Active: false},
+	}
+
+	for _, user := range users {
+		err := repo.Create(ctx, user)
+		require.NoError(t, err, "Failed to create test user")
+	}
+
+	// Test max age
+	maxAge, err := repo.Max(ctx, "age")
+	require.NoError(t, err, "Max should not fail")
+	require.Equal(t, 45, maxAge, "Expected max age 45")
+
+	// Test max age with WHERE condition
+	maxAge, err = repo.Max(ctx, "age", WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("active = ?", true)
+	}))
+	require.NoError(t, err, "Max with WHERE should not fail")
+	require.Equal(t, 30, maxAge, "Expected max age 30 for active users")
+
+	// Test max age with WHERE condition
+	maxAge, err = repo.Max(ctx, "age", WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("active = ?", false).Where("age < ?", 40)
+	}))
+	require.NoError(t, err, "Max with WHERE should not fail")
+	require.Equal(t, 20, maxAge, "Expected max age 20 for disabled users with age < 40")
+}
+
+func TestGormRepository_MaxEmptyTable(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	// Test max on empty table
+	maxAge, err := repo.Max(ctx, "age")
+	require.NoError(t, err, "Max on empty table should not fail")
+	require.Equal(t, 0, maxAge, "Expected max 0 on empty table")
+}
+
+func TestGormRepository_MaxInvalidColumn(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	// Create a user
+	user := createTestUser()
+	err := repo.Create(ctx, user)
+	require.NoError(t, err, "Failed to create test user")
+
+	// Test max with invalid column
+	_, err = repo.Max(ctx, "invalid_column")
+	require.Error(t, err, "Max with invalid column should fail")
+}
+
 func TestGormRepository_Save(t *testing.T) {
 	db := setupTestDB(t)
 	repo := &GormRepository[tests.TestUser]{DB: db}

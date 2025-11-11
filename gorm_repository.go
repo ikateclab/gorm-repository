@@ -122,6 +122,23 @@ func (r *GormRepository[T]) FindById(ctx context.Context, id uuid.UUID, options 
 	return &entity, nil
 }
 
+func (r *GormRepository[T]) Max(ctx context.Context, column string, options ...Option) (int, error) {
+	entity := newEntity[T]()
+	var max *int
+
+	db := applyOptions(r.DB, options).WithContext(ctx)
+
+	if err := db.Model(&entity).Select("MAX(?)", gorm.Expr(column)).Scan(&max).Error; err != nil {
+		return 0, err
+	}
+
+	if max == nil {
+		return 0, nil
+	}
+
+	return *max, nil
+}
+
 func (r *GormRepository[T]) Create(ctx context.Context, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	if err := db.Omit(clause.Associations).Create(entity).Error; err != nil {
