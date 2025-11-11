@@ -259,9 +259,9 @@ func TestGormRepository_BulkUpdate(t *testing.T) {
 
 	// Create multiple users
 	users := []*tests.TestUser{
-		{Id: uuid.New(), Name: "User 1", Email: "user1@example.com", Age: 25, Active: true, Data: &tests.UserData{Married: false}},
+		{Id: uuid.New(), Name: "User 1", Email: "user1@example.com", Age: 25, Active: true, Data: &tests.UserData{Day: 10, Married: false}},
 		{Id: uuid.New(), Name: "User 2", Email: "user2@example.com", Age: 30, Active: true, Data: nil},
-		{Id: uuid.New(), Name: "User 3", Email: "user3@example.com", Age: 35, Active: false, Data: &tests.UserData{Married: true}},
+		{Id: uuid.New(), Name: "User 3", Email: "user3@example.com", Age: 35, Active: false, Data: &tests.UserData{Day: 25, Married: true}},
 	}
 
 	for _, user := range users {
@@ -308,6 +308,26 @@ func TestGormRepository_BulkUpdate(t *testing.T) {
 	}))
 	require.NoError(t, err, "FindMany should not fail")
 	require.Len(t, users, 0, "Expected 0 users")
+
+	// Find user by day data - before update
+	users, err = repo.FindMany(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("(data->>'day')::int < ?", 15)
+	}))
+	require.NoError(t, err, "FindMany should not fail")
+	require.Len(t, users, 1, "Expected 1 user")
+
+	// Update day data from user
+	err = repo.BulkUpdate(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("(data->>'day')::int > ?", 15)
+	}), map[string]interface{}{"Data": map[string]interface{}{"Day": 10}})
+	require.NoError(t, err, "BulkUpdate should not fail")
+
+	// Find user by day data - after update
+	users, err = repo.FindMany(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("(data->>'day')::int < ?", 15)
+	}))
+	require.NoError(t, err, "FindMany should not fail")
+	require.Len(t, users, 2, "Expected 2 users")
 }
 
 func TestGormRepository_BulkUpdateInvalidWhere(t *testing.T) {
