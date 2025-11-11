@@ -201,8 +201,10 @@ type Repository[T any] interface {
     FindPaginated(ctx context.Context, page int, pageSize int, options ...Option) (*PaginationResult[*T], error)
     FindById(ctx context.Context, id uuid.UUID, options ...Option) (*T, error)
     FindOne(ctx context.Context, options ...Option) (*T, error)
+    Max(ctx context.Context, column string, options ...Option) (int, error)
     Create(ctx context.Context, entity *T, options ...Option) error
     Save(ctx context.Context, entity *T, options ...Option) error
+    BulkUpdate(ctx context.Context, where Option, mask map[string]interface{}, options ...Option) error
     UpdateById(ctx context.Context, id uuid.UUID, entity *T, options ...Option) error
     UpdateByIdWithMask(ctx context.Context, id uuid.UUID, mask map[string]interface{}, entity *T, options ...Option) error
     UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (*T, error)
