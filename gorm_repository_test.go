@@ -188,6 +188,84 @@ func TestGormRepository_Save(t *testing.T) {
 	require.Equal(t, 25, updatedUser.Age, "Expected updated age 25")
 }
 
+func TestGormRepository_BulkUpdate(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	// Create multiple users
+	users := []*tests.TestUser{
+		{Id: uuid.New(), Name: "User 1", Email: "user1@example.com", Age: 25, Active: true, Data: &tests.UserData{Married: false}},
+		{Id: uuid.New(), Name: "User 2", Email: "user2@example.com", Age: 30, Active: true, Data: nil},
+		{Id: uuid.New(), Name: "User 3", Email: "user3@example.com", Age: 35, Active: false, Data: &tests.UserData{Married: true}},
+	}
+
+	for _, user := range users {
+		err := repo.Create(ctx, user)
+		require.NoError(t, err, "Failed to create test user")
+	}
+
+	// Find user by name and age - before update
+	users, err := repo.FindMany(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("name = ?", "User").Where("age = ?", 35)
+	}))
+	require.NoError(t, err, "FindMany should not fail")
+	require.Len(t, users, 0, "Expected 0 users")
+
+	// Update name and age from user
+	err = repo.BulkUpdate(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("name <> ?", "User")
+	}), map[string]interface{}{"Name": "User", "Age": 35})
+	require.NoError(t, err, "BulkUpdate should not fail")
+
+	// Find user by name and age - after update
+	users, err = repo.FindMany(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("name = ?", "User").Where("age = ?", 35)
+	}))
+	require.NoError(t, err, "FindMany should not fail")
+	require.Len(t, users, 3, "Expected 3 users")
+
+	// Find user by active and married data - before update
+	users, err = repo.FindMany(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("active = ? OR (data->>'married')::boolean = ?", true, true)
+	}))
+	require.NoError(t, err, "FindMany should not fail")
+	require.Len(t, users, 3, "Expected 3 users")
+
+	// Update active and married data from user
+	err = repo.BulkUpdate(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("active = ? OR (data->>'married')::boolean = ?", true, true)
+	}), map[string]interface{}{"Active": false, "Data": map[string]interface{}{"Married": false}})
+	require.NoError(t, err, "BulkUpdate should not fail")
+
+	// Find user by active and married data - after update
+	users, err = repo.FindMany(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("active = ? OR (data->>'married')::boolean = ?", true, true)
+	}))
+	require.NoError(t, err, "FindMany should not fail")
+	require.Len(t, users, 0, "Expected 0 users")
+}
+
+func TestGormRepository_BulkUpdateInvalidWhere(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	err := repo.BulkUpdate(ctx, nil, map[string]interface{}{})
+	require.EqualError(t, err, "WHERE conditions are required for bulk update", "BulkUpdate should fail with nil where")
+}
+
+func TestGormRepository_BulkUpdateInvalidJsonMarshal(t *testing.T) {
+	db := setupTestDB(t)
+	repo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	err := repo.BulkUpdate(ctx, WithQuery(func(db *gorm.DB) *gorm.DB {
+		return db.Where("name <> ?", "User")
+	}), map[string]interface{}{"InvalidField": "InvalidValue"})
+	require.Error(t, err, "BulkUpdate should fail with invalid json marshal")
+}
+
 func TestGormRepository_DeleteById(t *testing.T) {
 	db := setupTestDB(t)
 	repo := &GormRepository[tests.TestUser]{DB: db}

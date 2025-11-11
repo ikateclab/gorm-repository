@@ -2,6 +2,7 @@ package gormrepository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
@@ -135,6 +136,32 @@ func (r *GormRepository[T]) Create(ctx context.Context, entity *T, options ...Op
 func (r *GormRepository[T]) Save(ctx context.Context, entity *T, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	return db.Omit(clause.Associations).Save(entity).Error
+}
+
+func (r *GormRepository[T]) BulkUpdate(ctx context.Context, where Option, mask map[string]interface{}, options ...Option) error {
+	if where == nil {
+		return fmt.Errorf("WHERE conditions are required for bulk update")
+	}
+
+	db := applyOptions(r.DB, options).WithContext(ctx)
+	entity := newEntity[T]()
+
+	jsonData, err := json.Marshal(mask)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal(jsonData, &entity)
+	if err != nil {
+		return err
+	}
+
+	updateMap, err := utils.EntityToMap(mask, entity)
+	if err != nil {
+		return err
+	}
+
+	return db.Model(&entity).Omit(clause.Associations).Where(where(db)).Updates(updateMap).Error
 }
 
 func (r *GormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID, values map[string]interface{}, options ...Option) (*T, error) {
