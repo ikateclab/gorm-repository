@@ -106,16 +106,39 @@ func (u *User) Diff(other *User) map[string]interface{} {
     return diff
 }
 
-// Usage with transactions
+// Usage with transactions — err must be declared before the defer so
+// tx.Finish sees the final error value when the function returns.
+var err error
 tx := userRepo.BeginTransaction()
 defer tx.Finish(&err)
 
-// Find and modify
-user, err := userRepo.FindById(ctx, userID, gr.WithTx(tx))
+// Find and modify (clone is automatically stored in the transaction)
+var user *User
+user, err = userRepo.FindById(ctx, userID, gr.WithTx(tx))
+if err != nil {
+    return err
+}
 user.Name = "Updated Name"
 
 // Only changed fields will be updated
 err = userRepo.UpdateById(ctx, userID, user, gr.WithTx(tx))
+```
+
+### In-Place Updates
+
+`UpdateByIdInPlace` and `UpdateInPlace` clone the entity before the mutation, apply the update function, diff the result, and persist only changed fields — all in one call. The difference is that `UpdateByIdInPlace` takes an explicit UUID while `UpdateInPlace` derives the primary key from the entity itself.
+
+```go
+// UpdateByIdInPlace: pass the id separately
+err := userRepo.UpdateByIdInPlace(ctx, userID, user, func() {
+    user.Name = "New Name"
+    user.Email = "new@example.com"
+})
+
+// UpdateInPlace: id is read from user.Id
+err := userRepo.UpdateInPlace(ctx, user, func() {
+    user.Name = "New Name"
+})
 ```
 
 ### Transaction Management
@@ -151,6 +174,23 @@ if err != nil {
 }
 
 err = userRepo.Create(ctx, user2, gr.WithTx(tx))
+
+// Method 3: Nested transactions
+outerTx := userRepo.BeginTransaction()
+defer outerTx.Finish(&err)
+
+innerTx := outerTx.BeginTransaction()
+defer innerTx.Finish(&err)
+
+err = userRepo.Create(ctx, user1, gr.WithTx(innerTx))
+if err != nil {
+    return err
+}
+
+// Check the underlying GORM transaction for errors
+if txErr := outerTx.Error(); txErr != nil {
+    return txErr
+}
 ```
 
 ### Advanced Querying
@@ -175,6 +215,17 @@ users, err := userRepo.FindMany(ctx,
         "active": true,
         "age":    25,
     }),
+)
+
+// Max value of a column
+maxAge, err := userRepo.Max(ctx, "age")
+
+// Bulk update — map keys are struct field names, values are the new values to set
+err = userRepo.BulkUpdate(ctx,
+    gr.WithQuery(func(db *gorm.DB) *gorm.DB {
+        return db.Where("active = ?", false)
+    }),
+    map[string]interface{}{"Name": "Inactive User"},
 )
 ```
 
@@ -244,6 +295,19 @@ fields := map[string]interface{}{
 
 updateMap, err := utils.EntityToMap(fields, user)
 // Returns: map[string]interface{}{"name": "John", "email": "john@example.com", "age": 25}
+```
+
+### JSON Merge Expression (PostgreSQL)
+
+`BuildJSONMergeExpr` constructs a PostgreSQL `||` merge expression that shallow-merges a JSON value into an existing `json`/`jsonb` column. It automatically detects the column type from `information_schema` and handles `NULL` columns via `COALESCE`.
+
+```go
+import (
+    gr "github.com/ikateclab/gorm-repository"
+)
+
+mergeExpr := gr.BuildJSONMergeExpr(db, "users", "settings", `{"theme":"dark","locale":"en"}`)
+err := db.Model(&user).Update("settings", mergeExpr).Error
 ```
 
 ## Requirements

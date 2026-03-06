@@ -35,12 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `UpdateById()` - Update entity by Id with diff support
 - `UpdateByIdWithMask()` - Update with field mask
 - `UpdateByIdWithMap()` - Update with map values
-- `UpdateByIdInPlace()` - Update with callback function
+- `UpdateByIdInPlace()` - Update with callback function (explicit id)
+- `UpdateInPlace()` - Update with callback function (id from entity)
+- `Max()` - Get maximum value of a column
+- `BulkUpdate()` - Bulk update entities matching a WHERE condition
 - `DeleteById()` - Delete entity by Id
-- `BeginTransaction()` - Start transaction
+- `BeginTransaction()` - Start transaction (also available on `Tx` for nesting)
 - `AppendAssociation()` - Add associations
 - `RemoveAssociation()` - Remove associations
 - `ReplaceAssociation()` - Replace associations
+- `GetDB()` - Get the underlying GORM DB instance
 
 ### Requirements
 - Go 1.24+
