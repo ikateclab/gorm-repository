@@ -14,12 +14,12 @@ import (
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 
-	"github.com/ikateclab/gorm-repository/plugin"
 	"github.com/ikateclab/gorm-repository/utils"
 )
 
 const (
-	txContextKey = "__tx"
+	txContextKey  = "__tx"
+	commitHookKey = "cache:commit_hook"
 )
 
 // Global cache for JSON column types to avoid repeated database queries
@@ -356,8 +356,9 @@ func (r *GormRepository[T]) GetDB() *gorm.DB {
 	return r.DB
 }
 
-// BeginTransaction starts a new transaction that should be used with defer for automatic cleanup.
-// The returned Tx implements plugin.CommitHook so cache invalidations are
+// BeginTransaction starts a new transaction that should be used with defer
+// for automatic cleanup. The returned Tx satisfies the cache plugin's
+// CommitHook interface (OnCommit + OnRollback) so cache invalidations are
 // deferred to commit automatically.
 func (r *GormRepository[T]) BeginTransaction() *Tx {
 	gtx := r.DB.Begin()
@@ -367,9 +368,7 @@ func (r *GormRepository[T]) BeginTransaction() *Tx {
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
 	}
-	// Plant the CommitHook on the GORM session so the cache plugin can
-	// discover it via db.Get(CommitHookKey).
-	tx.gtx = tx.gtx.Set(plugin.CommitHookKey, plugin.CommitHook(tx))
+	tx.gtx = tx.gtx.Set(commitHookKey, tx)
 	return tx
 }
 
@@ -404,14 +403,21 @@ type Tx struct {
 	clonedEntities map[string]interface{}
 	mutex          sync.RWMutex
 
-	// commitFns and rollbackFns support the plugin.CommitHook interface
-	// so cache invalidations can be deferred to transaction boundaries.
+	// commitFns and rollbackFns support the cache plugin's CommitHook
+	// interface so invalidations can be deferred to transaction boundaries.
 	commitFns   []func(context.Context) error
 	rollbackFns []func()
 }
 
-// BeginTransaction starts a nested transaction. Commit hooks registered
-// on the nested Tx bubble up to the parent on commit.
+// commitHook mirrors plugin.CommitHook for compile-time verification.
+type commitHook interface {
+	OnCommit(func(context.Context) error)
+	OnRollback(func())
+}
+
+var _ commitHook = (*Tx)(nil)
+
+// BeginTransaction starts a nested transaction.
 func (tx *Tx) BeginTransaction() *Tx {
 	gtx := tx.gtx.Begin()
 	child := &Tx{
@@ -420,13 +426,11 @@ func (tx *Tx) BeginTransaction() *Tx {
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
 	}
-	child.gtx = child.gtx.Set(plugin.CommitHookKey, plugin.CommitHook(child))
+	child.gtx = child.gtx.Set(commitHookKey, child)
 	return child
 }
 
 // OnCommit registers fn to run after the transaction commits successfully.
-// This implements the plugin.CommitHook interface so cache invalidations
-// can be deferred to transaction boundaries.
 func (tx *Tx) OnCommit(fn func(context.Context) error) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
@@ -434,7 +438,6 @@ func (tx *Tx) OnCommit(fn func(context.Context) error) {
 }
 
 // OnRollback registers fn to run when the transaction rolls back.
-// This implements the plugin.CommitHook interface.
 func (tx *Tx) OnRollback(fn func()) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
