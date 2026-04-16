@@ -44,24 +44,24 @@ func New(cache Cache, opts ...Option) *Plugin {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	reg := make(map[string]*ModelOptions)
+	for table, mo := range o.modelRegistrations {
+		reg[table] = mo
+	}
 	return &Plugin{
 		cache:    cache,
 		options:  o,
-		registry: make(map[string]*ModelOptions),
+		registry: reg,
 	}
 }
 
 // Name satisfies gorm.Plugin.
 func (p *Plugin) Name() string { return pluginName }
 
-// Initialize satisfies gorm.Plugin. PR-1 only validates the
-// configuration; subsequent PRs will register query/create/update/delete
-// callbacks here.
+// Initialize satisfies gorm.Plugin. It registers query, create, update,
+// and delete callbacks that implement cache read-through and invalidation.
 func (p *Plugin) Initialize(db *gorm.DB) error {
-	// Intentionally a no-op for the foundation PR. Callback registration
-	// arrives in PR-2 (Phases 5-6) per the design doc.
-	_ = db
-	return nil
+	return p.registerCallbacks(db)
 }
 
 // Cache exposes the underlying storage to callbacks and tests.

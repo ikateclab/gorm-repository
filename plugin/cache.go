@@ -48,6 +48,11 @@ type options struct {
 	debug         bool
 	scopeColumns  []string
 	metrics       Metrics
+
+	// modelRegistrations holds per-model overrides specified via
+	// RegisterModel[T]() at construction time. They are transferred
+	// to the Plugin's registry in New().
+	modelRegistrations map[string]*ModelOptions
 }
 
 // WithDefaultTTL sets the default TTL for cached entries. Zero means no

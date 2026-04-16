@@ -28,37 +28,51 @@ type PendingTracker interface {
 	HasPendingWrites() bool
 }
 
-// ctxKey is an unexported type used as the key for context and
-// gorm.Statement settings. Declaring a private type prevents collisions
-// with keys defined in other packages.
+// ctxKey is an unexported type used as context.Value keys.
 type ctxKey int
 
 const (
-	// CommitHookKey is the context.Value / db.Set key under which a
-	// CommitHook is advertised to the plugin.
-	CommitHookKey ctxKey = iota + 1
+	// ctxCommitHookKey is the context.Value key for CommitHook.
+	ctxCommitHookKey ctxKey = iota + 1
 
-	// PendingTrackerKey is the context.Value / db.Set key under which a
-	// PendingTracker is advertised to the plugin.
-	PendingTrackerKey
+	// ctxPendingTrackerKey is the context.Value key for PendingTracker.
+	ctxPendingTrackerKey
 )
 
+// String-based keys for GORM's db.Set/db.Get (which require string keys).
+const (
+	// CommitHookKey is the db.Set key under which a CommitHook is stored.
+	CommitHookKey = "cache:commit_hook"
+
+	// PendingTrackerKey is the db.Set key under which a PendingTracker
+	// is stored.
+	PendingTrackerKey = "cache:pending_tracker"
+)
+
+// CommitHookContext returns a context carrying the given CommitHook,
+// discoverable via LookupCommitHook.
+func CommitHookContext(ctx context.Context, hook CommitHook) context.Context {
+	return context.WithValue(ctx, ctxCommitHookKey, hook)
+}
+
+// PendingTrackerContext returns a context carrying the given PendingTracker.
+func PendingTrackerContext(ctx context.Context, pt PendingTracker) context.Context {
+	return context.WithValue(ctx, ctxPendingTrackerKey, pt)
+}
+
 // LookupCommitHook extracts a CommitHook from either the context or the
-// current gorm.Statement. Callers (the plugin's write callbacks) use this
-// to decide whether to invalidate inline or defer.
-//
-// It is defined here rather than inline at the call site so tests can
-// exercise the discovery logic independently.
-func LookupCommitHook(ctx context.Context, settings func(interface{}) (interface{}, bool)) (CommitHook, bool) {
+// current gorm session (db.Get). Callers (the plugin's write callbacks)
+// use this to decide whether to invalidate inline or defer.
+func LookupCommitHook(ctx context.Context, dbGet func(string) (interface{}, bool)) (CommitHook, bool) {
 	if ctx != nil {
-		if v := ctx.Value(CommitHookKey); v != nil {
+		if v := ctx.Value(ctxCommitHookKey); v != nil {
 			if h, ok := v.(CommitHook); ok {
 				return h, true
 			}
 		}
 	}
-	if settings != nil {
-		if v, ok := settings(CommitHookKey); ok {
+	if dbGet != nil {
+		if v, ok := dbGet(CommitHookKey); ok {
 			if h, ok := v.(CommitHook); ok {
 				return h, true
 			}

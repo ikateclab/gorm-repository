@@ -35,11 +35,10 @@ func TestNew_Options(t *testing.T) {
 	assert.True(t, p.Debug())
 }
 
-func TestPlugin_Initialize_Noop(t *testing.T) {
-	// Phase 1 keeps Initialize a no-op; this test pins that contract so a
-	// regression in PR-2 surfaces explicitly.
+func TestPlugin_Initialize(t *testing.T) {
+	db := newTestDB(t)
 	p := New(nil)
-	require.NoError(t, p.Initialize(nil))
+	require.NoError(t, p.Initialize(db))
 }
 
 func TestPlugin_Register(t *testing.T) {

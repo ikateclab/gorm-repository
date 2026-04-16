@@ -23,7 +23,7 @@ func (f *fakeHook) OnRollback(fn func()) {
 
 func TestLookupCommitHook_FromContext(t *testing.T) {
 	hook := &fakeHook{}
-	ctx := context.WithValue(context.Background(), CommitHookKey, CommitHook(hook))
+	ctx := CommitHookContext(context.Background(), hook)
 
 	got, ok := LookupCommitHook(ctx, nil)
 	assert.True(t, ok)
@@ -32,7 +32,7 @@ func TestLookupCommitHook_FromContext(t *testing.T) {
 
 func TestLookupCommitHook_FromSettings(t *testing.T) {
 	hook := &fakeHook{}
-	settings := func(k interface{}) (interface{}, bool) {
+	settings := func(k string) (interface{}, bool) {
 		if k == CommitHookKey {
 			return CommitHook(hook), true
 		}
@@ -51,7 +51,7 @@ func TestLookupCommitHook_NotFound(t *testing.T) {
 }
 
 func TestLookupCommitHook_WrongType(t *testing.T) {
-	ctx := context.WithValue(context.Background(), CommitHookKey, "not-a-hook")
+	ctx := context.WithValue(context.Background(), ctxCommitHookKey, "not-a-hook")
 	got, ok := LookupCommitHook(ctx, nil)
 	assert.False(t, ok)
 	assert.Nil(t, got)
