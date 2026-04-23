@@ -258,6 +258,11 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 		return nil // No changes
 	}
 
+	delete(diff, "UpdatedAt")
+	if len(diff) == 0 {
+		return nil
+	}
+
 	// Process the diff to handle flattened JSONB paths (dot notation)
 	processedDiff := processJSONBDiff(db, entity, diff)
 
