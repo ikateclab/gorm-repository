@@ -254,6 +254,9 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 	clone := getCloneForDiff(db, entity)
 
 	diff := diffable.Diff(clone)
+
+	delete(diff, "UpdatedAt")
+
 	if len(diff) == 0 {
 		return nil // No changes
 	}
