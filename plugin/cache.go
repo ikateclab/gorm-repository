@@ -42,8 +42,9 @@ const (
 type Option func(*options)
 
 type options struct {
-	defaultTTL    time.Duration
-	defaultTxMode TxMode
+	defaultTTL     time.Duration
+	defaultTTLFunc func() time.Duration
+	defaultTxMode  TxMode
 	schemaVersion string
 	debug         bool
 	scopeColumns  []string
@@ -53,12 +54,25 @@ type options struct {
 	// RegisterModel[T]() at construction time. They are transferred
 	// to the Plugin's registry in New().
 	modelRegistrations map[string]*ModelOptions
+
+	// tagStrategy, when set via WithTagStrategy, replaces the plugin's
+	// built-in tag derivation entirely. See tag_strategy.go.
+	tagStrategy TagStrategy
 }
 
 // WithDefaultTTL sets the default TTL for cached entries. Zero means no
 // expiry.
 func WithDefaultTTL(ttl time.Duration) Option {
 	return func(o *options) { o.defaultTTL = ttl }
+}
+
+// WithDefaultTTLFunc sets a function called to compute the TTL for each
+// cached entry, instead of one fixed WithDefaultTTL duration. Useful for
+// jitter — e.g. a random duration within a range — so entries written
+// around the same time don't all expire together and stampede the
+// database. Takes precedence over WithDefaultTTL when both are set.
+func WithDefaultTTLFunc(fn func() time.Duration) Option {
+	return func(o *options) { o.defaultTTLFunc = fn }
 }
 
 // WithDefaultTxMode sets the default transaction mode. Callers can

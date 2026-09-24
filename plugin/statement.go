@@ -13,25 +13,26 @@ import (
 	"gorm.io/gorm"
 )
 
-// keyPrefix identifies plugin-owned keys in any backend store.
-const keyPrefix = "gormcache:"
+// keyPrefix marks a data key as written by this (Go) side of the cache,
+// mirroring the "nodecache:" prefix the Node.js backend puts on its own
+// data keys — each language's data keys are never read by the other, but
+// carrying a matching kind of marker keeps a `redis-cli SCAN` readable
+// about which side wrote what.
+const keyPrefix = "gocache:"
 
-// CacheKey derives a deterministic cache key from a GORM statement.
-//
-// The key incorporates: the optional schema-version prefix, the table
-// name, the rendered SQL string, the bound parameter values, and the
-// destination type. SHA-256 is used purely as a length normalizer; the
-// inputs are unambiguous on their own.
-//
-// Vars are serialised in declaration order — GORM preserves it, so this
-// is stable for identical queries.
+// CacheKey derives a deterministic cache key from a GORM statement, in the
+// form "gocache:{schemaVersion:}{table}:{hash}" — schemaVersion and table
+// kept readable for inspection, the hash (SQL + vars + dest type)
+// covering everything that actually varies between queries on that table.
 func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
 	var b strings.Builder
 	if schemaVersion != "" {
 		b.WriteString(schemaVersion)
 		b.WriteByte('|')
 	}
+	table := ""
 	if stmt != nil {
+		table = stmt.Table
 		b.WriteString(stmt.Table)
 		b.WriteByte('|')
 		b.WriteString(stmt.SQL.String())
@@ -41,7 +42,20 @@ func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
 		b.WriteString(varsSignature(stmt.Vars))
 	}
 	sum := sha256.Sum256([]byte(b.String()))
-	return keyPrefix + hex.EncodeToString(sum[:])
+
+	var key strings.Builder
+	key.WriteString(keyPrefix)
+	if schemaVersion != "" {
+		key.WriteString(schemaVersion)
+		key.WriteByte(':')
+	}
+	if table == "" {
+		table = "no-table"
+	}
+	key.WriteString(table)
+	key.WriteByte(':')
+	key.WriteString(hex.EncodeToString(sum[:]))
+	return key.String()
 }
 
 // destSignature returns a stable label for stmt.Dest, distinguishing
@@ -89,9 +103,23 @@ func writeVar(b *strings.Builder, v interface{}) {
 		writeVar(b, rv.Elem().Interface())
 	case reflect.Slice, reflect.Array:
 		// Bytes fast-path so []byte parameters don't blow up the key.
+		// uuid.UUID and similar fixed-size byte arrays (what FindById's id
+		// argument actually is) land here as reflect.Array, not
+		// reflect.Slice — and since they arrive via an interface{} bound
+		// var, the reflect.Value is never addressable, so rv.Bytes()
+		// panics ("reflect.Value.Bytes of unaddressable byte array").
+		// Copy element-by-element for arrays instead of relying on it.
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
 			b.WriteByte('[')
-			b.WriteString(hex.EncodeToString(rv.Bytes()))
+			if rv.Kind() == reflect.Slice {
+				b.WriteString(hex.EncodeToString(rv.Bytes()))
+			} else {
+				buf := make([]byte, rv.Len())
+				for i := 0; i < rv.Len(); i++ {
+					buf[i] = byte(rv.Index(i).Uint())
+				}
+				b.WriteString(hex.EncodeToString(buf))
+			}
 			b.WriteByte(']')
 			return
 		}

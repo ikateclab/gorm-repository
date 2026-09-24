@@ -61,7 +61,24 @@ func (p *Plugin) shouldSkipCache(db *gorm.DB) bool {
 	if pt := lookupPendingTracker(db); pt != nil && pt.HasPendingWrites() {
 		return true
 	}
+	// GORM's anonymous many2many join structs copy both FK fields' json
+	// tags from the related models' PKs — almost always json:"id" on both,
+	// which encoding/json silently drops. Never cache these; a named join
+	// type registered via db.SetupJoinTable avoids the bypass entirely.
+	if isAnonymousStructDest(db.Statement.Dest) {
+		return true
+	}
 	return false
+}
+
+// isAnonymousStructDest reports whether dest is an unnamed struct type
+// (e.g. one built via reflect.StructOf), after unwrapping ptr/slice/array.
+func isAnonymousStructDest(dest interface{}) bool {
+	t := reflect.TypeOf(dest)
+	for t != nil && (t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+		t = t.Elem()
+	}
+	return t != nil && t.Kind() == reflect.Struct && t.Name() == ""
 }
 
 // queryReplace replaces GORM's default gorm:query callback. On cache hit
@@ -91,7 +108,7 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 			log.Printf("[cache] Get error for %s: %v", key, err)
 		}
 		// Fall through to DB.
-		p.execAndCache(db, key, label)
+		p.execAndCache(db, key, label, schemaVer)
 		return
 	}
 
@@ -101,23 +118,30 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 				log.Printf("[cache] unmarshal error for %s: %v", key, err)
 			}
 			// Corrupted — run actual query and re-cache.
-			p.execAndCache(db, key, label)
+			p.execAndCache(db, key, label, schemaVer)
 			return
 		}
 		p.options.metrics.Hit(label)
 		db.RowsAffected = countRows(db.Statement.Dest)
+		// GORM's processor logs stmt.SQL unconditionally after this callback
+		// returns, whenever it's non-empty — regardless of whether a real
+		// query ran. BuildQuerySQL above populated it just to derive the
+		// cache key, so clear it here to avoid a misleading "SELECT ..."
+		// trace log for a query that never touched the database.
+		db.Statement.SQL.Reset()
+		db.Statement.Vars = nil
 		return
 	}
 
 	// Cache miss.
 	p.options.metrics.Miss(label)
-	p.execAndCache(db, key, label)
+	p.execAndCache(db, key, label, schemaVer)
 }
 
 // execAndCache executes the already-built query, scans results, and
 // populates the cache. This mirrors gorm/callbacks.Query but adds
 // cache population.
-func (p *Plugin) execAndCache(db *gorm.DB, key, label string) {
+func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
 	if db.DryRun || db.Error != nil {
 		return
 	}
@@ -150,7 +174,12 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label string) {
 		return
 	}
 
-	tags := p.tagsForStatement(db)
+	var tags []string
+	if p.options.tagStrategy != nil {
+		tags = p.options.tagStrategy.ReadTags(db, schemaVer)
+	} else {
+		tags = p.tagsForStatement(db)
+	}
 	ttl := p.resolveTTL(db)
 	ctx := db.Statement.Context
 	txMode := ResolveTxMode(db, p.options.defaultTxMode)
@@ -176,7 +205,12 @@ func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 			return
 		}
 
-		tags := p.tagsForWrite(db)
+		var tags []string
+		if p.options.tagStrategy != nil {
+			tags = p.options.tagStrategy.WriteTags(db, p.resolveSchemaVersion(db))
+		} else {
+			tags = p.tagsForWrite(db)
+		}
 		if len(tags) == 0 {
 			return
 		}
@@ -233,6 +267,9 @@ func (p *Plugin) tagsForWrite(db *gorm.DB) []string {
 func (p *Plugin) resolveTTL(db *gorm.DB) time.Duration {
 	if mo, ok := p.LookupModel(db.Statement.Table); ok && mo.TTL > 0 {
 		return mo.TTL
+	}
+	if p.options.defaultTTLFunc != nil {
+		return p.options.defaultTTLFunc()
 	}
 	return p.options.defaultTTL
 }

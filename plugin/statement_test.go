@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
 )
@@ -53,14 +54,24 @@ func TestCacheKey_NilStatement(t *testing.T) {
 	k1 := CacheKey(nil, "")
 	k2 := CacheKey(nil, "")
 	assert.Equal(t, k1, k2)
-	assert.True(t, strings.HasPrefix(k1, keyPrefix))
+	assert.True(t, strings.HasPrefix(k1, keyPrefix+"no-table:"))
 }
 
 func TestCacheKey_Format(t *testing.T) {
 	k := CacheKey(makeStmt("t", "S", nil, nil), "")
-	assert.True(t, strings.HasPrefix(k, keyPrefix), "key should be prefix-namespaced")
-	// SHA-256 hex == 64 chars
-	assert.Equal(t, len(keyPrefix)+64, len(k))
+	assert.True(t, strings.HasPrefix(k, keyPrefix+"t:"), "key should be prefix-namespaced by table")
+	hash := strings.TrimPrefix(k, keyPrefix+"t:")
+	assert.Len(t, hash, 64, "SHA-256 hex digest")
+}
+
+func TestCacheKey_ReadablePrefix(t *testing.T) {
+	k := CacheKey(makeStmt("users", "S", nil, nil), "v1")
+	assert.True(t, strings.HasPrefix(k, keyPrefix+"v1:users:"))
+}
+
+func TestCacheKey_NoTableFallback(t *testing.T) {
+	k := CacheKey(nil, "v1")
+	assert.True(t, strings.HasPrefix(k, keyPrefix+"v1:no-table:"))
 }
 
 func TestVarsSignature_Types(t *testing.T) {
@@ -77,6 +88,7 @@ func TestVarsSignature_Types(t *testing.T) {
 		{"bytes", []interface{}{[]byte{0xde, 0xad, 0xbe, 0xef}}},
 		{"nil-pointer", []interface{}{(*int)(nil)}},
 		{"time", []interface{}{time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC)}},
+		{"uuid", []interface{}{uuid.MustParse("f47ac10b-58cc-4372-a567-0e02b2c3d479")}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -86,6 +98,44 @@ func TestVarsSignature_Types(t *testing.T) {
 			assert.NotEmpty(t, s1)
 		})
 	}
+}
+
+// TestVarsSignature_UUID_DoesNotPanic is a regression test for a
+// production crash: uuid.UUID is a [16]byte array, and unlike a []byte
+// slice, an array value obtained through an interface{} (exactly how
+// GORM stores bound query vars) is never addressable — reflect.Value.Bytes
+// panics on it ("reflect.Value.Bytes of unaddressable byte array"). This
+// hit every cached FindById call, since gorm-repository's FindById takes
+// a uuid.UUID id and binds it directly as a WHERE var.
+func TestVarsSignature_UUID_DoesNotPanic(t *testing.T) {
+	id := uuid.MustParse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+
+	assert.NotPanics(t, func() {
+		varsSignature([]interface{}{id})
+	})
+
+	// Must also be stable and distinguish different UUIDs, not just avoid
+	// panicking.
+	other := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	s1 := varsSignature([]interface{}{id})
+	s2 := varsSignature([]interface{}{id})
+	s3 := varsSignature([]interface{}{other})
+	assert.Equal(t, s1, s2)
+	assert.NotEqual(t, s1, s3)
+}
+
+// TestCacheKey_FindByIdShape_UUID reproduces the exact call shape that
+// crashed in production: a Statement whose Vars carries a uuid.UUID, as
+// GormRepository[T].FindById builds it.
+func TestCacheKey_FindByIdShape_UUID(t *testing.T) {
+	type User struct{}
+	var u User
+	id := uuid.MustParse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+	stmt := makeStmt("users", `SELECT * FROM "users" WHERE id = ? AND "users"."deletedAt" IS NULL`, []interface{}{id}, &u)
+
+	assert.NotPanics(t, func() {
+		CacheKey(stmt, "")
+	})
 }
 
 func TestModelLabel(t *testing.T) {

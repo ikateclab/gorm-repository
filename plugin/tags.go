@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"gorm.io/gorm"
@@ -135,7 +136,7 @@ func TagsFromStatement(stmt *gorm.Statement, scopeColumns []string) []string {
 	}
 
 	for _, col := range scopeColumns {
-		if v, ok := extractScopeValue(stmt, col); ok {
+		if v, ok := ExtractScopeValue(stmt, col); ok {
 			add(fmt.Sprintf("%s:%v", col, v))
 		}
 	}
@@ -151,13 +152,11 @@ func TagsFromStatement(stmt *gorm.Statement, scopeColumns []string) []string {
 	return out
 }
 
-// extractScopeValue returns the bound value of a top-level WHERE
-// equality (or single-element IN) on the given column, if any.
-//
-// We deliberately don't recurse into OR conditions: an OR over a scope
-// column produces multiple legitimate values and there's no single tag
-// that captures the query.
-func extractScopeValue(stmt *gorm.Statement, column string) (interface{}, bool) {
+// ExtractScopeValue returns the bound value of a top-level WHERE equality
+// (or single-element IN) on column, from either a structured Where or a
+// raw `column = ?` condition. Doesn't recurse into OR (no single value
+// would capture it).
+func ExtractScopeValue(stmt *gorm.Statement, column string) (interface{}, bool) {
 	if stmt == nil {
 		return nil, false
 	}
@@ -177,6 +176,11 @@ func extractScopeValue(stmt *gorm.Statement, column string) (interface{}, bool) 
 	return nil, false
 }
 
+// simpleEqExprRe matches a raw-SQL `column = ?` condition (optionally
+// double-quoted), as produced by db.Where("id = ?", v) — a clause.Expr,
+// not the structured clause.Eq a map/struct Where produces.
+var simpleEqExprRe = regexp.MustCompile(`^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s*=\s*\?\s*$`)
+
 func matchClauseExpr(expr clause.Expression, column string) (interface{}, bool) {
 	switch e := expr.(type) {
 	case clause.Eq:
@@ -186,6 +190,12 @@ func matchClauseExpr(expr clause.Expression, column string) (interface{}, bool) 
 	case clause.IN:
 		if columnMatches(e.Column, column) && len(e.Values) == 1 {
 			return e.Values[0], true
+		}
+	case clause.Expr:
+		if len(e.Vars) == 1 {
+			if m := simpleEqExprRe.FindStringSubmatch(e.SQL); m != nil && columnMatches(m[1], column) {
+				return e.Vars[0], true
+			}
 		}
 	case clause.AndConditions:
 		for _, sub := range e.Exprs {

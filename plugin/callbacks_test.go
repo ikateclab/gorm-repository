@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/ikateclab/gorm-repository/plugin/memory"
 )
@@ -283,6 +284,93 @@ func TestCallback_PendingTracker_SkipsCache(t *testing.T) {
 	assert.Equal(t, "alice", u2.Name)
 	// Should not have gotten a cache hit (dirty state bypasses cache).
 	assert.Equal(t, 1, met.misses, "dirty-state query should not count as miss in cache path")
+}
+
+// fakeSQLLogger records every Trace call gorm's processor makes — the
+// call that logs stmt.SQL after the query callback chain runs, regardless
+// of whether a real query executed.
+type fakeSQLLogger struct {
+	logger.Interface
+	traces int
+}
+
+func (f *fakeSQLLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	f.traces++
+}
+
+func TestCallback_QueryHit_DoesNotLogSQL(t *testing.T) {
+	fakeLog := &fakeSQLLogger{Interface: logger.Default}
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: fakeLog})
+	require.NoError(t, err)
+
+	mc := memory.New()
+	require.NoError(t, db.Use(New(mc, WithDefaultTTL(5*time.Minute))))
+	require.NoError(t, db.AutoMigrate(&testUser{}))
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+
+	// First query: cache miss → real query → SQL trace expected.
+	fakeLog.traces = 0
+	var u1 testUser
+	require.NoError(t, db.First(&u1, 1).Error)
+	assert.Equal(t, 1, fakeLog.traces, "a real query should still be traced")
+
+	// Second, identical query: cache hit → no real query → no SQL trace,
+	// even though BuildQuerySQL still runs to derive the cache key.
+	fakeLog.traces = 0
+	var u2 testUser
+	require.NoError(t, db.First(&u2, 1).Error)
+	assert.Equal(t, "alice", u2.Name)
+	assert.Equal(t, 0, fakeLog.traces, "a cache hit must not log a SELECT that never ran")
+}
+
+// TestCallback_AnonymousStructDest_NeverCached guards the fix for a real
+// GORM behavior: the anonymous struct type GORM builds on the fly for a
+// many2many join table copies each foreign-key field's ENTIRE original
+// struct tag from the related model's primary-key field — json tag
+// included. Since almost every model's primary key is tagged json:"id",
+// two such foreign-key fields collide on that same tag, and
+// encoding/json's documented behavior is to silently omit BOTH fields —
+// so a cached entry here would have no real data in it, and a cache hit
+// would hand back zero-value foreign keys. Rather than work around that
+// serialization quirk, an anonymous dest type is simply never cached (see
+// isAnonymousStructDest) — cheap, indexed pivot-table lookups don't need
+// it, and it removes the risk entirely instead of papering over it.
+func TestCallback_AnonymousStructDest_NeverCached(t *testing.T) {
+	db, mc, met := setupCachedDB(t)
+
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+
+	for i := 1; i <= 2; i++ {
+		var rows []struct {
+			ID   uint
+			Name string
+		}
+		require.NoError(t, db.Table("test_users").Find(&rows).Error)
+		require.Len(t, rows, 1)
+		assert.Equal(t, "alice", rows[0].Name)
+	}
+
+	assert.Equal(t, 0, mc.Len(), "an anonymous struct dest must never be cached")
+	assert.Equal(t, 0, met.hits)
+	assert.Equal(t, 0, met.misses, "skipped entirely, not even counted as a miss")
+}
+
+// TestCallback_NamedStructDest_StillCached is the control for the test
+// above: a normal, named struct type continues to cache exactly as before.
+func TestCallback_NamedStructDest_StillCached(t *testing.T) {
+	db, mc, met := setupCachedDB(t)
+
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+
+	var u1 testUser
+	require.NoError(t, db.First(&u1, 1).Error)
+	var u2 testUser
+	require.NoError(t, db.First(&u2, 1).Error)
+
+	assert.Equal(t, 1, mc.Len())
+	assert.Equal(t, 1, met.misses)
+	assert.Equal(t, 1, met.hits)
 }
 
 func TestCallback_CountRows_Slice(t *testing.T) {
