@@ -58,6 +58,8 @@ type options struct {
 	// tagStrategy, when set via WithTagStrategy, replaces the plugin's
 	// built-in tag derivation entirely. See tag_strategy.go.
 	tagStrategy TagStrategy
+
+	recorder EventRecorder
 }
 
 // WithDefaultTTL sets the default TTL for cached entries. Zero means no

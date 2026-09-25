@@ -86,6 +86,9 @@ func isAnonymousStructDest(dest interface{}) bool {
 // (identically to the stock callback) and then caches the result.
 func (p *Plugin) queryReplace(db *gorm.DB) {
 	if p.shouldSkipCache(db) {
+		if p.cache != nil && db.Statement != nil && db.Error == nil {
+			p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: "bypass"})
+		}
 		callbacks.Query(db)
 		return
 	}
@@ -107,6 +110,7 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 		if p.options.debug {
 			log.Printf("[cache] Get error for %s: %v", key, err)
 		}
+		p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "get", Err: err})
 		// Fall through to DB.
 		p.execAndCache(db, key, label, schemaVer)
 		return
@@ -117,11 +121,13 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 			if p.options.debug {
 				log.Printf("[cache] unmarshal error for %s: %v", key, err)
 			}
+			p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "unmarshal", Err: err})
 			// Corrupted — run actual query and re-cache.
 			p.execAndCache(db, key, label, schemaVer)
 			return
 		}
 		p.options.metrics.Hit(label)
+		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key})
 		db.RowsAffected = countRows(db.Statement.Dest)
 		// GORM's processor logs stmt.SQL unconditionally after this callback
 		// returns, whenever it's non-empty — regardless of whether a real
@@ -135,6 +141,7 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 
 	// Cache miss.
 	p.options.metrics.Miss(label)
+	p.emit(ctx, Event{Kind: EventMiss, Model: label, Key: key, SQL: db.Statement.SQL.String()})
 	p.execAndCache(db, key, label, schemaVer)
 }
 
@@ -161,7 +168,12 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
 		db.Statement.Result.RowsAffected = db.RowsAffected
 	}
 
-	if db.Error != nil || p.cache == nil {
+	if p.cache == nil {
+		return
+	}
+	if db.Error != nil {
+		// Includes gorm.ErrRecordNotFound: not-found results are never cached.
+		p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Err: db.Error})
 		return
 	}
 
@@ -171,6 +183,7 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
 		if p.options.debug {
 			log.Printf("[cache] marshal error for %s: %v", key, err)
 		}
+		p.emit(db.Statement.Context, Event{Kind: EventError, Model: label, Key: key, Reason: "marshal", Err: err})
 		return
 	}
 
@@ -186,10 +199,10 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
 
 	if hook, hasTx := LookupCommitHook(ctx, db.Get); hasTx && txMode == TxDeferred {
 		hook.OnCommit(func(commitCtx context.Context) error {
-			return p.cache.Set(commitCtx, key, data, tags, ttl)
+			return p.set(commitCtx, key, label, data, tags, ttl)
 		})
 	} else {
-		if setErr := p.cache.Set(ctx, key, data, tags, ttl); setErr != nil {
+		if setErr := p.set(ctx, key, label, data, tags, ttl); setErr != nil {
 			if p.options.debug {
 				log.Printf("[cache] Set error for %s: %v", key, setErr)
 			}
@@ -228,11 +241,11 @@ func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 		if hook, hasTx := LookupCommitHook(ctx, db.Get); hasTx && txMode != TxBypass {
 			hook.OnCommit(func(commitCtx context.Context) error {
 				p.options.metrics.Invalidation(label, reason)
-				return p.cache.Invalidate(commitCtx, tags)
+				return p.invalidate(commitCtx, label, reason, tags)
 			})
 		} else {
 			p.options.metrics.Invalidation(label, reason)
-			if err := p.cache.Invalidate(ctx, tags); err != nil {
+			if err := p.invalidate(ctx, label, reason, tags); err != nil {
 				if p.options.debug {
 					log.Printf("[cache] Invalidate error: %v", err)
 				}
