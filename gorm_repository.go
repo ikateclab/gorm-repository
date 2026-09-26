@@ -14,11 +14,14 @@ import (
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 
+	"github.com/ikateclab/gorm-repository/plugin"
 	"github.com/ikateclab/gorm-repository/utils"
 )
 
 const (
-	txContextKey = "__tx"
+	txContextKey      = "__tx"
+	commitHookKey     = "cache:commit_hook"
+	pendingTrackerKey = "cache:pending_tracker"
 )
 
 // Global cache for JSON column types to avoid repeated database queries
@@ -191,6 +194,10 @@ func (r *GormRepository[T]) UpdateByIdWithMap(ctx context.Context, id uuid.UUID,
 	db := applyOptions(r.DB, options).WithContext(ctx)
 	entity := newEntity[T]()
 
+	// entity is blank (Model carries no populated Id either), so a cache
+	// plugin's TagStrategy has nothing to read off Dest/Model — we already
+	// know id here, so hand it over directly (see WithIDHint's doc).
+	db = plugin.WithIDHint(db, id.String())
 	if err := db.Model(&entity).Omit(clause.Associations).Clauses(clause.Returning{}).Where("id = ?", id).Updates(values).Error; err != nil {
 		return nil, err
 	}
@@ -325,6 +332,11 @@ func (r *GormRepository[T]) UpdateInPlace(ctx context.Context, entity *T, update
 
 func (r *GormRepository[T]) DeleteById(ctx context.Context, id uuid.UUID, options ...Option) error {
 	db := applyOptions(r.DB, options).WithContext(ctx)
+	// Dest (new(T)) is a blank entity, so a cache plugin's TagStrategy has
+	// no populated Id to read off it. We already know id here — hand it
+	// over directly instead of leaving the strategy to reverse-engineer
+	// it by parsing the compiled WHERE clause.
+	db = plugin.WithIDHint(db, id.String())
 	return db.Delete(new(T), "id = ?", id).Error
 }
 
@@ -358,23 +370,46 @@ func (r *GormRepository[T]) GetDB() *gorm.DB {
 	return r.DB
 }
 
-// BeginTransaction starts a new transaction that should be used with defer for automatic cleanup
+// BeginTransaction starts a transaction whose Tx implements the cache
+// plugin's CommitHook (defers invalidation to commit) and PendingTracker
+// (so a read after a write on this tx can't return a stale cached value).
 func (r *GormRepository[T]) BeginTransaction() *Tx {
 	gtx := r.DB.Begin()
-	return &Tx{
+	tx := &Tx{
 		gtx:            gtx,
 		committed:      false,
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
 	}
+	setCommitHook(tx.gtx, tx)
+	setPendingTracker(tx.gtx, tx)
+	return tx
+}
+
+// setCommitHook stashes tx on gtx's Settings for the cache plugin (see
+// plugin.LookupCommitHook), writing directly instead of via (*gorm.DB).Set
+// — Set's getInstance() always returns clone==0, and reassigning gtx to it
+// would make every later WithTx(tx) skip cloning, leaking one call's
+// Preloads/Where/Selects into every other call sharing this tx.
+func setCommitHook(gtx *gorm.DB, hook interface{}) {
+	gtx.Statement.Settings.Store(commitHookKey, hook)
+}
+
+// setPendingTracker mirrors setCommitHook, for the cache plugin's
+// dirty-state check (plugin.PendingTrackerKey via db.Get).
+func setPendingTracker(gtx *gorm.DB, tracker interface{}) {
+	gtx.Statement.Settings.Store(pendingTrackerKey, tracker)
 }
 
 // WithTx returns an option to run the query within a transaction.
 // When used with Find operations, it automatically clones entities that support cloning.
 func WithTx(tx *Tx) Option {
 	return func(db *gorm.DB) *gorm.DB {
-		// Store the transaction reference in the context for later use
-		return tx.gtx.Set(txContextKey, tx)
+		// .Set() directly on tx.gtx (clone==1) would go through gorm's
+		// getInstance() clone==1 path, which drops Settings — losing the
+		// commit hook/pending tracker. .Session() first forces the other
+		// clone path, (*Statement).clone(), which does copy Settings.
+		return tx.gtx.Session(&gorm.Session{Context: tx.gtx.Statement.Context}).Set(txContextKey, tx)
 	}
 }
 
@@ -399,20 +434,81 @@ type Tx struct {
 	// key is a unique identifier for the entity, value is the cloned entity snapshot
 	clonedEntities map[string]interface{}
 	mutex          sync.RWMutex
+
+	// commitFns and rollbackFns support the cache plugin's CommitHook
+	// interface so invalidations can be deferred to transaction boundaries.
+	commitFns   []func(context.Context) error
+	rollbackFns []func()
+
+	// pending supports the cache plugin's PendingTracker interface: once
+	// any write happens on this Tx, every subsequent read on it must skip
+	// the cache — under TxDeferred, that write's own invalidation is
+	// deferred to commit, so without this a read later in the same
+	// transaction could still be served the value cached before the write.
+	pending bool
 }
 
-// BeginTransaction starts a nested transaction
+// commitHook mirrors plugin.CommitHook for compile-time verification.
+type commitHook interface {
+	OnCommit(func(context.Context) error)
+	OnRollback(func())
+}
+
+var _ commitHook = (*Tx)(nil)
+
+// pendingTracker mirrors plugin.PendingTracker for compile-time verification.
+type pendingTracker interface {
+	MarkPending()
+	HasPendingWrites() bool
+}
+
+var _ pendingTracker = (*Tx)(nil)
+
+// MarkPending records that a write has happened on this transaction. Called
+// by the cache plugin's write callback.
+func (tx *Tx) MarkPending() {
+	tx.mutex.Lock()
+	defer tx.mutex.Unlock()
+	tx.pending = true
+}
+
+// HasPendingWrites reports whether MarkPending has been called on this
+// transaction since it began.
+func (tx *Tx) HasPendingWrites() bool {
+	tx.mutex.RLock()
+	defer tx.mutex.RUnlock()
+	return tx.pending
+}
+
+// BeginTransaction starts a nested transaction.
 func (tx *Tx) BeginTransaction() *Tx {
 	gtx := tx.gtx.Begin()
-	return &Tx{
+	child := &Tx{
 		gtx:            gtx,
 		committed:      false,
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
 	}
+	setCommitHook(child.gtx, child)
+	setPendingTracker(child.gtx, child)
+	return child
 }
 
-// Commit commits the transaction
+// OnCommit registers fn to run after the transaction commits successfully.
+func (tx *Tx) OnCommit(fn func(context.Context) error) {
+	tx.mutex.Lock()
+	defer tx.mutex.Unlock()
+	tx.commitFns = append(tx.commitFns, fn)
+}
+
+// OnRollback registers fn to run when the transaction rolls back.
+func (tx *Tx) OnRollback(fn func()) {
+	tx.mutex.Lock()
+	defer tx.mutex.Unlock()
+	tx.rollbackFns = append(tx.rollbackFns, fn)
+}
+
+// Commit commits the transaction and runs registered commit hooks.
 func (tx *Tx) Commit() error {
 	if tx.committed || tx.rolledBack {
 		return nil
@@ -421,11 +517,12 @@ func (tx *Tx) Commit() error {
 	err := tx.gtx.Commit().Error
 	if err == nil {
 		tx.committed = true
+		tx.runCommitHooks()
 	}
 	return err
 }
 
-// Rollback rolls back the transaction
+// Rollback rolls back the transaction and runs registered rollback hooks.
 func (tx *Tx) Rollback() error {
 	if tx.committed || tx.rolledBack {
 		return nil
@@ -434,8 +531,31 @@ func (tx *Tx) Rollback() error {
 	err := tx.gtx.Rollback().Error
 	if err == nil {
 		tx.rolledBack = true
+		tx.runRollbackHooks()
 	}
 	return err
+}
+
+func (tx *Tx) runCommitHooks() {
+	tx.mutex.RLock()
+	fns := tx.commitFns
+	tx.mutex.RUnlock()
+	ctx := context.Background()
+	if tx.gtx.Statement != nil && tx.gtx.Statement.Context != nil {
+		ctx = tx.gtx.Statement.Context
+	}
+	for _, fn := range fns {
+		_ = fn(ctx) // best-effort; errors are logged by the plugin
+	}
+}
+
+func (tx *Tx) runRollbackHooks() {
+	tx.mutex.RLock()
+	fns := tx.rollbackFns
+	tx.mutex.RUnlock()
+	for _, fn := range fns {
+		fn()
+	}
 }
 
 // Finish should be called with defer to automatically handle commit/rollback
