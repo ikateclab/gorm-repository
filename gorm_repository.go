@@ -19,9 +19,7 @@ import (
 )
 
 const (
-	txContextKey      = "__tx"
-	commitHookKey     = "cache:commit_hook"
-	pendingTrackerKey = "cache:pending_tracker"
+	txContextKey = "__tx"
 )
 
 // Global cache for JSON column types to avoid repeated database queries
@@ -389,13 +387,13 @@ func (r *GormRepository[T]) BeginTransaction() *Tx {
 // would make every later WithTx(tx) skip cloning, leaking one call's
 // Preloads/Where/Selects into every other call sharing this tx.
 func setCommitHook(gtx *gorm.DB, hook interface{}) {
-	gtx.Statement.Settings.Store(commitHookKey, hook)
+	gtx.Statement.Settings.Store(plugin.CommitHookKey, hook)
 }
 
 // setPendingTracker mirrors setCommitHook, for the cache plugin's
 // dirty-state check (plugin.PendingTrackerKey via db.Get).
 func setPendingTracker(gtx *gorm.DB, tracker interface{}) {
-	gtx.Statement.Settings.Store(pendingTrackerKey, tracker)
+	gtx.Statement.Settings.Store(plugin.PendingTrackerKey, tracker)
 }
 
 // WithTx returns an option to run the query within a transaction.

@@ -16,9 +16,9 @@ import (
 type Cache struct {
 	mu    sync.Mutex
 	max   int
-	items map[string]*list.Element        // key -> element holding *entry
-	order *list.List                      // LRU order; front = most recently used
-	tags  map[string]map[string]struct{}  // tag -> set of keys
+	items map[string]*list.Element       // key -> element holding *entry
+	order *list.List                     // LRU order; front = most recently used
+	tags  map[string]map[string]struct{} // tag -> set of keys
 	now   func() time.Time
 }
 

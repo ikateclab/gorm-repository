@@ -16,7 +16,7 @@ import (
 // the child query separately from the parent's, through this same plugin
 // recursively, so it's cached and invalidated on its own.
 type preloadParent struct {
-	ID       string `gorm:"primarykey"`
+	ID       string         `gorm:"primarykey"`
 	Children []preloadChild `gorm:"foreignKey:ParentID"`
 }
 

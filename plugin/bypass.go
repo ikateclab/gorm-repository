@@ -3,9 +3,8 @@ package plugin
 import "gorm.io/gorm"
 
 // Setting keys planted on a *gorm.DB session via db.Set / db.Get to
-// influence per-call cache behavior. They are exported so the
-// repository-level shim can offer typed wrappers (e.g.
-// gormrepository.WithTxMode) without re-declaring the keys.
+// influence per-call cache behavior. They are exported so callers can set
+// them directly; Bypass and WithTxMode below are typed wrappers.
 const (
 	// BypassSetting — bool. When true the plugin skips the cache for
 	// this call.
