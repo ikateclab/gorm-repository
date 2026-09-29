@@ -2,6 +2,7 @@ package rediscache
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -217,4 +218,69 @@ func TestSet_RefreshesExistingTagTTL(t *testing.T) {
 	ttl, err := client.TTL(ctx, tagPrefix+"Contact:1").Result()
 	require.NoError(t, err)
 	require.Greater(t, ttl, time.Minute, "the second Set's longer ttl must have refreshed the tag's expiry")
+}
+
+// TestSet_ShorterTTLDoesNotOrphanEntry: a later, shorter-lived entry under
+// the same tag used to shorten the tag SET's own expiry; once the SET
+// expired, invalidating the tag no longer reached the longer-lived entry.
+func TestSet_ShorterTTLDoesNotOrphanEntry(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client)
+	ctx := context.Background()
+
+	require.NoError(t, c.Set(ctx, "long", []byte("v"), []string{"table:users"}, time.Minute))
+	require.NoError(t, c.Set(ctx, "short", []byte("v"), []string{"table:users"}, time.Second))
+
+	ttl, err := client.TTL(ctx, tagPrefix+"table:users").Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, 30*time.Second, "a shorter ttl must not shorten the tag SET's expiry")
+
+	time.Sleep(1500 * time.Millisecond)
+	require.NoError(t, c.Invalidate(ctx, []string{"table:users"}))
+
+	_, hit, err := c.Get(ctx, "long")
+	require.NoError(t, err)
+	require.False(t, hit, "the long-lived entry must still be reachable through its tag")
+}
+
+// TestSet_NoTTLEntryMakesExistingTagPersistent: a no-expiry entry joining a
+// tag that already has an expiry must not be left behind when it expires.
+func TestSet_NoTTLEntryMakesExistingTagPersistent(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client)
+	ctx := context.Background()
+
+	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, time.Minute))
+	require.NoError(t, c.Set(ctx, "k2", []byte("v2"), []string{"Contact:1"}, 0))
+
+	ttl, err := client.TTL(ctx, tagPrefix+"Contact:1").Result()
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(-1), ttl)
+
+	// And a later expiring entry must not make it volatile again.
+	require.NoError(t, c.Set(ctx, "k3", []byte("v3"), []string{"Contact:1"}, time.Minute))
+	ttl, err = client.TTL(ctx, tagPrefix+"Contact:1").Result()
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(-1), ttl)
+}
+
+// TestInvalidate_DrainsLargeTagInBatches covers tags with more members than
+// one SPOP batch.
+func TestInvalidate_DrainsLargeTagInBatches(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client)
+	ctx := context.Background()
+
+	n := invalidateBatch*2 + 17
+	for i := 0; i < n; i++ {
+		require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), []byte("v"), []string{"big"}, time.Minute))
+	}
+	require.NoError(t, c.Invalidate(ctx, []string{"big"}))
+
+	keys, err := client.Keys(ctx, dataPrefix+"*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	exists, err := client.Exists(ctx, tagPrefix+"big").Result()
+	require.NoError(t, err)
+	require.Zero(t, exists)
 }
