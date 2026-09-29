@@ -1,18 +1,20 @@
 package plugin
 
 import (
+	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 // pluginName identifies this plugin in GORM's plugin registry.
 const pluginName = "gormrepository:cache"
 
-// Plugin is the GORM plugin that installs cache callbacks. The current
-// PR-1 wiring registers the plugin and exposes its configuration; the
-// query/write callbacks are added in PR-2.
+// Plugin is the GORM plugin that installs cache callbacks: read-through
+// on queries, tag-based invalidation on writes.
 type Plugin struct {
 	cache   Cache
 	options options
@@ -21,13 +23,12 @@ type Plugin struct {
 	registryMu sync.RWMutex
 }
 
-// ModelOptions holds per-model configuration. A future Register option
-// will populate this map; for now it exists so callbacks can look up
-// overrides without API churn.
+// ModelOptions holds per-model configuration, populated via
+// RegisterModel[T] or Register.
 type ModelOptions struct {
-	TTL        time.Duration
-	Bypass     bool
-	ExtraTags  []string
+	TTL       time.Duration
+	Bypass    bool
+	ExtraTags []string
 }
 
 // New constructs a new cache plugin.
@@ -58,10 +59,38 @@ func New(cache Cache, opts ...Option) *Plugin {
 // Name satisfies gorm.Plugin.
 func (p *Plugin) Name() string { return pluginName }
 
-// Initialize satisfies gorm.Plugin. It registers query, create, update,
-// and delete callbacks that implement cache read-through and invalidation.
+// Initialize satisfies gorm.Plugin. It resolves RegisterModel tables with
+// db's NamingStrategy, then registers query, create, update, delete, and
+// raw callbacks that implement cache read-through and invalidation.
 func (p *Plugin) Initialize(db *gorm.DB) error {
+	if err := p.resolveModelTables(db); err != nil {
+		return err
+	}
 	return p.registerCallbacks(db)
+}
+
+// resolveModelTables re-keys RegisterModel[T] registrations by the table
+// name db's NamingStrategy gives T. RegisterModel only has GORM's default
+// naming to go on, which misses custom namers (e.g. a camelCase or
+// singular-table strategy) — and a registration keyed by the wrong table
+// is silently never applied.
+func (p *Plugin) resolveModelTables(db *gorm.DB) error {
+	p.registryMu.Lock()
+	defer p.registryMu.Unlock()
+	for typ, defaultTable := range p.options.modelTypes {
+		s, err := schema.Parse(reflect.New(typ).Interface(), &sync.Map{}, db.NamingStrategy)
+		if err != nil {
+			return fmt.Errorf("cache plugin: resolve table for %s: %w", typ, err)
+		}
+		if s.Table == defaultTable {
+			continue
+		}
+		if mo, ok := p.registry[defaultTable]; ok {
+			delete(p.registry, defaultTable)
+			p.registry[s.Table] = mo
+		}
+	}
+	return nil
 }
 
 // Cache exposes the underlying storage to callbacks and tests.
@@ -89,8 +118,8 @@ func (p *Plugin) Metrics() Metrics { return p.options.metrics }
 // Debug reports whether verbose logging is enabled.
 func (p *Plugin) Debug() bool { return p.options.debug }
 
-// Register stores per-model overrides keyed by table name. Currently
-// internal-only; a typed Register[T] generic option will land in PR-4.
+// Register stores per-model overrides keyed by table name. RegisterModel[T]
+// is the typed alternative at construction time.
 func (p *Plugin) Register(table string, m ModelOptions) {
 	p.registryMu.Lock()
 	defer p.registryMu.Unlock()

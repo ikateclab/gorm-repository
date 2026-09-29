@@ -9,7 +9,8 @@ import (
 
 // RegisterModel returns an Option that registers per-model overrides at
 // plugin construction time. The table name is inferred from T's Tabler
-// implementation or from GORM's default naming strategy.
+// implementation or GORM's default naming strategy, then re-resolved with
+// the DB's own NamingStrategy when the plugin is installed (db.Use).
 //
 // Usage:
 //
@@ -28,6 +29,10 @@ func RegisterModel[T any](mopts ...ModelOption) Option {
 			o.modelRegistrations = make(map[string]*ModelOptions)
 		}
 		o.modelRegistrations[table] = &mo
+		if o.modelTypes == nil {
+			o.modelTypes = make(map[reflect.Type]string)
+		}
+		o.modelTypes[reflect.TypeOf((*T)(nil)).Elem()] = table
 	}
 }
 
