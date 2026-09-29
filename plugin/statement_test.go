@@ -74,6 +74,16 @@ func TestCacheKey_NoTableFallback(t *testing.T) {
 	assert.True(t, strings.HasPrefix(k, keyPrefix+"v1:no-table:"))
 }
 
+func TestCacheKey_KeyPrefix(t *testing.T) {
+	s := makeStmt("users", "S", nil, nil)
+	a := New(nil, WithKeyPrefix("svc-a")).cacheKey(s, "v1")
+	b := New(nil, WithKeyPrefix("svc-b")).cacheKey(s, "v1")
+
+	assert.True(t, strings.HasPrefix(a, keyPrefix+"svc-a:v1:users:"))
+	assert.NotEqual(t, a, b, "services sharing a cache must not share keys")
+	assert.Equal(t, CacheKey(s, "v1"), New(nil).cacheKey(s, "v1"), "no prefix keeps the plain layout")
+}
+
 func TestVarsSignature_Types(t *testing.T) {
 	cases := []struct {
 		name string

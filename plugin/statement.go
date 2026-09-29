@@ -22,10 +22,26 @@ const keyPrefix = "gocache:"
 
 // CacheKey derives a deterministic cache key from a GORM statement, in the
 // form "gocache:{schemaVersion:}{table}:{hash}" — schemaVersion and table
-// kept readable for inspection, the hash (SQL + vars + dest type)
+// kept readable for inspection, the hash (codec + SQL + vars + dest type)
 // covering everything that actually varies between queries on that table.
 func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
+	return buildCacheKey("", schemaVersion, stmt)
+}
+
+// cacheKey is CacheKey plus the plugin's WithKeyPrefix namespace.
+func (p *Plugin) cacheKey(stmt *gorm.Statement, schemaVersion string) string {
+	return buildCacheKey(p.options.keyPrefix, schemaVersion, stmt)
+}
+
+// buildCacheKey renders "gocache:{prefix:}{schemaVersion:}{table}:{hash}".
+func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
 	var b strings.Builder
+	b.WriteString(codecVersion)
+	b.WriteByte('|')
+	if prefix != "" {
+		b.WriteString(prefix)
+		b.WriteByte('|')
+	}
 	if schemaVersion != "" {
 		b.WriteString(schemaVersion)
 		b.WriteByte('|')
@@ -45,6 +61,10 @@ func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
 
 	var key strings.Builder
 	key.WriteString(keyPrefix)
+	if prefix != "" {
+		key.WriteString(prefix)
+		key.WriteByte(':')
+	}
 	if schemaVersion != "" {
 		key.WriteString(schemaVersion)
 		key.WriteByte(':')

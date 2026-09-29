@@ -42,7 +42,7 @@ func (w *txCacheTestWidget) Diff(other *txCacheTestWidget) map[string]interface{
 	return diff
 }
 
-func setupTxCacheDB(t *testing.T) (*gorm.DB, *GormRepository[txCacheTestWidget]) {
+func setupTxCacheDB(t *testing.T, opts ...plugin.Option) (*gorm.DB, *GormRepository[txCacheTestWidget]) {
 	t.Helper()
 	// "cache=shared" (rather than forcing MaxOpenConns(1)) lets every
 	// connection in the pool see the same :memory: database — pinning the
@@ -58,10 +58,10 @@ func setupTxCacheDB(t *testing.T) (*gorm.DB, *GormRepository[txCacheTestWidget])
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 
-	p := plugin.New(memory.New(),
-		plugin.WithDefaultTTL(5*time.Minute),
+	p := plugin.New(memory.New(), append([]plugin.Option{
+		plugin.WithDefaultTTL(5 * time.Minute),
 		plugin.WithDefaultTxMode(plugin.TxDeferred),
-	)
+	}, opts...)...)
 	require.NoError(t, db.Use(p))
 	require.NoError(t, db.AutoMigrate(&txCacheTestWidget{}))
 
@@ -153,4 +153,31 @@ func TestTxDeferred_RollbackNeverInvalidates(t *testing.T) {
 	stillCached, err := repo.FindById(ctx, id)
 	require.NoError(t, err)
 	assert.Equal(t, "before", stillCached.Name)
+}
+
+// TestTxBypass_WriteInTx_InvalidatesOnlyAfterCommit covers the default
+// mode: a write inside the repository's Tx used to invalidate inline,
+// before commit, so a concurrent reader could re-cache the old row and
+// keep serving it after the commit.
+func TestTxBypass_WriteInTx_InvalidatesOnlyAfterCommit(t *testing.T) {
+	_, repo := setupTxCacheDB(t, plugin.WithDefaultTxMode(plugin.TxBypass))
+	ctx := context.Background()
+
+	id := uuid.New()
+	require.NoError(t, repo.Create(ctx, &txCacheTestWidget{Id: id, Name: "before"}))
+	_, err := repo.FindById(ctx, id)
+	require.NoError(t, err)
+
+	tx := repo.BeginTransaction()
+	require.NoError(t, repo.UpdateById(ctx, id, &txCacheTestWidget{Id: id, Name: "after"}, WithTx(tx)))
+
+	stillCached, err := repo.FindById(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "before", stillCached.Name, "TxBypass must defer invalidation to commit too")
+
+	require.NoError(t, tx.Commit())
+
+	afterCommit, err := repo.FindById(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "after", afterCommit.Name)
 }

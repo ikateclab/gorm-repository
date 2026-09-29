@@ -9,6 +9,7 @@ package plugin
 
 import (
 	"context"
+	"reflect"
 	"time"
 )
 
@@ -23,18 +24,23 @@ type Cache interface {
 }
 
 // TxMode controls how the plugin behaves inside an open GORM transaction.
-// See the design doc (section 4) for the decision matrix.
+//
+// In every mode, a write inside a transaction that exposes a CommitHook
+// (the repository's Tx does) invalidates on commit, never before it. A
+// plain GORM transaction (db.Begin, db.Transaction) has no hook: reads
+// inside it always skip the cache, and its writes invalidate inline.
 type TxMode int
 
 const (
-	// TxBypass skips the cache entirely inside any transaction. Default.
+	// TxBypass skips the cache for reads inside any transaction. Default.
 	TxBypass TxMode = iota
-	// TxDeferred reads from the cache inside a tx; Set and Invalidate are
-	// queued and applied on commit.
+	// TxDeferred serves reads inside a tx from the cache until the tx
+	// writes (see PendingTracker). Results read inside the tx are never
+	// stored, since another transaction may commit a newer value first.
 	TxDeferred
-	// TxFull reads and writes the cache inline inside a tx; only
-	// invalidations are deferred to commit. Unsafe under rollback — see
-	// the design doc before enabling.
+	// TxFull is TxDeferred, but also stores results read inside the tx
+	// inline. Unsafe: a snapshot read early in a long transaction can be
+	// cached after another transaction already invalidated it.
 	TxFull
 )
 
@@ -45,15 +51,21 @@ type options struct {
 	defaultTTL     time.Duration
 	defaultTTLFunc func() time.Duration
 	defaultTxMode  TxMode
-	schemaVersion string
-	debug         bool
-	scopeColumns  []string
-	metrics       Metrics
+	schemaVersion  string
+	keyPrefix      string
+	debug          bool
+	scopeColumns   []string
+	metrics        Metrics
 
 	// modelRegistrations holds per-model overrides specified via
 	// RegisterModel[T]() at construction time. They are transferred
 	// to the Plugin's registry in New().
 	modelRegistrations map[string]*ModelOptions
+
+	// modelTypes maps each RegisterModel[T] type to the table name it was
+	// registered under with GORM's default naming; Initialize re-resolves
+	// it with the DB's own NamingStrategy.
+	modelTypes map[reflect.Type]string
 
 	// tagStrategy, when set via WithTagStrategy, replaces the plugin's
 	// built-in tag derivation entirely. See tag_strategy.go.
@@ -88,6 +100,13 @@ func WithDefaultTxMode(mode TxMode) Option {
 // version.
 func WithSchemaVersion(v string) Option {
 	return func(o *options) { o.schemaVersion = v }
+}
+
+// WithKeyPrefix namespaces this plugin's cache keys, e.g. per service or
+// database, so two deployments sharing one cache backend can't collide on
+// same-named tables. Tags are not prefixed: invalidation stays shared.
+func WithKeyPrefix(prefix string) Option {
+	return func(o *options) { o.keyPrefix = prefix }
 }
 
 // WithDebug enables verbose logging of cache decisions. Intended for

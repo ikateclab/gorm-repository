@@ -16,7 +16,7 @@ import (
 
 // testUser is a simple model for callback tests.
 type testUser struct {
-	ID   uint   `gorm:"primarykey"`
+	ID   uint `gorm:"primarykey"`
 	Name string
 }
 
@@ -24,7 +24,7 @@ func (testUser) TableName() string { return "test_users" }
 
 // cachedTestUser implements CacheTaggable for invalidation tests.
 type cachedTestUser struct {
-	ID   uint   `gorm:"primarykey"`
+	ID   uint `gorm:"primarykey"`
 	Name string
 }
 
@@ -69,10 +69,14 @@ type testMetrics struct {
 	lastReason    string
 }
 
-func (m *testMetrics) Hit(model string)                  { m.hits++; m.lastModel = model }
-func (m *testMetrics) Miss(model string)                 { m.misses++; m.lastModel = model }
-func (m *testMetrics) Invalidation(model, reason string) { m.invalidations++; m.lastModel = model; m.lastReason = reason }
-func (m *testMetrics) PostCommitError()                  {}
+func (m *testMetrics) Hit(model string)  { m.hits++; m.lastModel = model }
+func (m *testMetrics) Miss(model string) { m.misses++; m.lastModel = model }
+func (m *testMetrics) Invalidation(model, reason string) {
+	m.invalidations++
+	m.lastModel = model
+	m.lastReason = reason
+}
+func (m *testMetrics) PostCommitError() {}
 
 func setupCachedDB(t *testing.T, opts ...Option) (*gorm.DB, *memory.Cache, *testMetrics) {
 	t.Helper()
@@ -216,7 +220,10 @@ func TestCallback_TxBypass_SkipsCache(t *testing.T) {
 	assert.Equal(t, 0, met.misses, "TxBypass should skip cache entirely")
 }
 
-func TestCallback_TxDeferred_DefersCacheSet(t *testing.T) {
+// TestCallback_TxDeferred_DoesNotStoreTxReads: a value read inside a
+// transaction can be overtaken by another transaction's commit before this
+// one ends, so TxDeferred never stores it — neither inline nor at commit.
+func TestCallback_TxDeferred_DoesNotStoreTxReads(t *testing.T) {
 	db, mc, _ := setupCachedDB(t, WithDefaultTxMode(TxDeferred))
 
 	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
@@ -228,15 +235,24 @@ func TestCallback_TxDeferred_DefersCacheSet(t *testing.T) {
 	require.NoError(t, txDB.First(&u, 1).Error)
 	assert.Equal(t, "alice", u.Name)
 
-	// Cache should not be populated yet (deferred to commit).
-	assert.Equal(t, 0, mc.Len(), "TxDeferred should not set cache inline")
-	assert.Len(t, hook.commits, 1, "should have registered one commit callback")
+	assert.Equal(t, 0, mc.Len(), "TxDeferred must not store a read made inside the tx")
+	assert.Empty(t, hook.commits, "nor defer storing it to commit")
+}
 
-	// Simulate commit.
-	for _, fn := range hook.commits {
-		require.NoError(t, fn(context.Background()))
-	}
-	assert.Equal(t, 1, mc.Len(), "cache should be populated after commit")
+// TestCallback_TxDeferred_ServesCachedValueInTx: a value cached outside
+// the tx may still be served inside it, until the tx writes.
+func TestCallback_TxDeferred_ServesCachedValueInTx(t *testing.T) {
+	db, _, met := setupCachedDB(t, WithDefaultTxMode(TxDeferred))
+
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+	var warm testUser
+	require.NoError(t, db.First(&warm, 1).Error)
+
+	txDB := db.Set(CommitHookKey, CommitHook(&fakeHook{}))
+	var u testUser
+	require.NoError(t, txDB.First(&u, 1).Error)
+	assert.Equal(t, "alice", u.Name)
+	assert.Equal(t, 1, met.hits)
 }
 
 func TestCallback_TxDeferred_DefersInvalidation(t *testing.T) {
@@ -387,7 +403,7 @@ type fakePendingTracker struct {
 	pending bool
 }
 
-func (f *fakePendingTracker) MarkPending()        { f.pending = true }
+func (f *fakePendingTracker) MarkPending()           { f.pending = true }
 func (f *fakePendingTracker) HasPendingWrites() bool { return f.pending }
 
 func extractPlugin(t *testing.T, db *gorm.DB) *Plugin {
