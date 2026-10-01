@@ -539,7 +539,8 @@ func (tx *Tx) runCommitHooks() {
 	tx.mutex.RUnlock()
 	ctx := context.Background()
 	if tx.gtx.Statement != nil && tx.gtx.Statement.Context != nil {
-		ctx = tx.gtx.Statement.Context
+		// The commit already happened: hooks run even if the request is gone.
+		ctx = context.WithoutCancel(tx.gtx.Statement.Context)
 	}
 	for _, fn := range fns {
 		_ = fn(ctx) // best-effort; errors are logged by the plugin

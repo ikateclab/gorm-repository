@@ -17,6 +17,10 @@ const (
 	createAfterName  = "gormrepository:cache:after_create"
 	updateAfterName  = "gormrepository:cache:after_update"
 	deleteAfterName  = "gormrepository:cache:after_delete"
+	// A Set deferred to commit this long after its read is dropped: the
+	// backend only remembers invalidations for a while.
+	maxDeferredSetAge = time.Minute
+	invalidateTimeout = 2 * time.Second
 )
 
 // registerCallbacks wires query/create/update/delete callbacks into db.
@@ -43,6 +47,10 @@ func (p *Plugin) shouldSkipCache(db *gorm.DB) bool {
 		return true
 	}
 	if IsBypassed(db) {
+		return true
+	}
+	// A locking read must reach the database to take the lock.
+	if _, ok := db.Statement.Clauses["FOR"]; ok {
 		return true
 	}
 	if db.Statement.Table != "" {
@@ -104,15 +112,23 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 	ctx := db.Statement.Context
 	label := modelLabel(db.Statement)
 
-	// Try cache.
-	data, hit, err := p.cache.Get(ctx, key)
+	// A read's tags come from the query alone. With none, nothing could
+	// invalidate its entry: it runs past the cache, without a lookup.
+	tags := p.readTags(db, schemaVer)
+	if len(tags) == 0 {
+		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "no-tags"})
+		p.execAndCache(db, key, label, nil, 0, false)
+		return
+	}
+
+	data, hit, seq, err := p.cache.Get(ctx, key, tags)
 	if err != nil {
 		if p.options.debug {
 			log.Printf("[cache] Get error for %s: %v", key, err)
 		}
-		p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "get", Err: err})
-		// Fall through to DB.
-		p.execAndCache(db, key, label, schemaVer)
+		p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "get", Tags: tags, Err: err})
+		// Fall through to DB, without caching: there's no seq to store under.
+		p.execAndCache(db, key, label, tags, 0, false)
 		return
 	}
 
@@ -121,13 +137,13 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 			if p.options.debug {
 				log.Printf("[cache] unmarshal error for %s: %v", key, err)
 			}
-			p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "unmarshal", Err: err})
+			p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "unmarshal", Tags: tags, Err: err})
 			// Corrupted — run actual query and re-cache.
-			p.execAndCache(db, key, label, schemaVer)
+			p.execAndCache(db, key, label, tags, seq, true)
 			return
 		}
 		p.options.metrics.Hit(label)
-		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key})
+		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key, Tags: tags})
 		db.RowsAffected = countRows(db.Statement.Dest)
 		// GORM's processor logs stmt.SQL unconditionally after this callback
 		// returns, whenever it's non-empty — regardless of whether a real
@@ -141,14 +157,14 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 
 	// Cache miss.
 	p.options.metrics.Miss(label)
-	p.emit(ctx, Event{Kind: EventMiss, Model: label, Key: key, SQL: db.Statement.SQL.String()})
-	p.execAndCache(db, key, label, schemaVer)
+	p.emit(ctx, Event{Kind: EventMiss, Model: label, Key: key, Tags: tags, SQL: db.Statement.SQL.String()})
+	p.execAndCache(db, key, label, tags, seq, true)
 }
 
-// execAndCache executes the already-built query, scans results, and
-// populates the cache. This mirrors gorm/callbacks.Query but adds
-// cache population.
-func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
+// execAndCache executes the already-built query, scans results, and —
+// when populate is set — caches them under tags and seq. This mirrors
+// gorm/callbacks.Query but adds cache population.
+func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, seq int64, populate bool) {
 	if db.DryRun || db.Error != nil {
 		return
 	}
@@ -168,7 +184,7 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
 		db.Statement.Result.RowsAffected = db.RowsAffected
 	}
 
-	if p.cache == nil {
+	if p.cache == nil || !populate {
 		return
 	}
 	if db.Error != nil {
@@ -187,22 +203,20 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
 		return
 	}
 
-	var tags []string
-	if p.options.tagStrategy != nil {
-		tags = p.options.tagStrategy.ReadTags(db, schemaVer)
-	} else {
-		tags = p.tagsForStatement(db)
-	}
-	ttl := p.resolveTTL(db)
 	ctx := db.Statement.Context
+	ttl := p.resolveTTL(db)
 	txMode := ResolveTxMode(db, p.options.defaultTxMode)
 
 	if hook, hasTx := LookupCommitHook(ctx, db.Get); hasTx && txMode == TxDeferred {
+		readAt := time.Now()
 		hook.OnCommit(func(commitCtx context.Context) error {
-			return p.set(commitCtx, key, label, data, tags, ttl)
+			if time.Since(readAt) > maxDeferredSetAge {
+				return nil
+			}
+			return p.set(commitCtx, key, label, data, tags, ttl, seq)
 		})
 	} else {
-		if setErr := p.set(ctx, key, label, data, tags, ttl); setErr != nil {
+		if setErr := p.set(ctx, key, label, data, tags, ttl, seq); setErr != nil {
 			if p.options.debug {
 				log.Printf("[cache] Set error for %s: %v", key, setErr)
 			}
@@ -228,7 +242,9 @@ func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 			return
 		}
 
-		ctx := db.Statement.Context
+		// A write that already reached the database invalidates even if the
+		// request that made it is gone.
+		ctx := context.WithoutCancel(db.Statement.Context)
 		label := modelLabel(db.Statement)
 
 		// Mark pending writes for dirty-state tracking.
@@ -245,6 +261,8 @@ func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 			})
 		} else {
 			p.options.metrics.Invalidation(label, reason)
+			ctx, cancel := context.WithTimeout(ctx, invalidateTimeout)
+			defer cancel()
 			if err := p.invalidate(ctx, label, reason, tags); err != nil {
 				if p.options.debug {
 					log.Printf("[cache] Invalidate error: %v", err)
@@ -252,6 +270,14 @@ func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 			}
 		}
 	}
+}
+
+// readTags derives a SELECT's tags from the query alone, before it runs.
+func (p *Plugin) readTags(db *gorm.DB, schemaVer string) []string {
+	if p.options.tagStrategy != nil {
+		return p.options.tagStrategy.ReadTags(db, schemaVer)
+	}
+	return p.tagsForStatement(db)
 }
 
 // tagsForStatement derives cache tags for a SELECT query.

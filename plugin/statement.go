@@ -14,14 +14,14 @@ import (
 )
 
 // keyPrefix marks a data key as written by this (Go) side of the cache,
-// mirroring the "nodecache:" prefix the Node.js backend puts on its own
+// mirroring the "cache:node:" prefix the Node.js backend puts on its own
 // data keys — each language's data keys are never read by the other, but
-// carrying a matching kind of marker keeps a `redis-cli SCAN` readable
-// about which side wrote what.
-const keyPrefix = "gocache:"
+// a matching marker keeps a `redis-cli SCAN` readable about which side
+// wrote what.
+const keyPrefix = "cache:go:"
 
 // CacheKey derives a deterministic cache key from a GORM statement, in the
-// form "gocache:{schemaVersion:}{table}:{hash}" — schemaVersion and table
+// form "cache:go:{schemaVersion:}{table}:{hash}" — schemaVersion and table
 // kept readable for inspection, the hash (SQL + vars + dest type)
 // covering everything that actually varies between queries on that table.
 func CacheKey(stmt *gorm.Statement, schemaVersion string) string {

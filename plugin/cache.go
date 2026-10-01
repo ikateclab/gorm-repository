@@ -14,11 +14,15 @@ import (
 
 // Cache is the only thing storage backends must implement.
 //
-// Implementations must be safe for concurrent use. Get returning
-// (nil, false, nil) indicates a miss with no error.
+// Implementations must be safe for concurrent use. Get receives the tags
+// the entry is known to depend on before the query runs, and returns seq:
+// the moment the read started. Set stores under that seq, and a backend
+// never serves a value whose tags were invalidated after it — otherwise a
+// read overlapping a write could cache the pre-write value after the
+// write's invalidation, and serve it until TTL.
 type Cache interface {
-	Get(ctx context.Context, key string) ([]byte, bool, error)
-	Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration) error
+	Get(ctx context.Context, key string, tags []string) (value []byte, hit bool, seq int64, err error)
+	Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration, seq int64) error
 	Invalidate(ctx context.Context, tags []string) error
 }
 

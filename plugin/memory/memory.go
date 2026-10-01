@@ -20,6 +20,10 @@ type Cache struct {
 	order *list.List                      // LRU order; front = most recently used
 	tags  map[string]map[string]struct{}  // tag -> set of keys
 	now   func() time.Time
+	// seq counts invalidations; inv holds each tag's last one, so a Set
+	// whose read started before it is refused.
+	seq int64
+	inv map[string]int64
 }
 
 type entry struct {
@@ -48,6 +52,7 @@ func New(opts ...Option) *Cache {
 		order: list.New(),
 		tags:  make(map[string]map[string]struct{}),
 		now:   time.Now,
+		inv:   make(map[string]int64),
 	}
 	for _, o := range opts {
 		o(c)
@@ -57,29 +62,35 @@ func New(opts ...Option) *Cache {
 
 // Get returns the cached bytes for key if present and unexpired. The
 // returned slice is a copy and is safe to mutate.
-func (c *Cache) Get(_ context.Context, key string) ([]byte, bool, error) {
+func (c *Cache) Get(_ context.Context, key string, _ []string) ([]byte, bool, int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[key]
 	if !ok {
-		return nil, false, nil
+		return nil, false, c.seq, nil
 	}
 	e := el.Value.(*entry)
 	if !e.expires.IsZero() && c.now().After(e.expires) {
 		c.removeLocked(el)
-		return nil, false, nil
+		return nil, false, c.seq, nil
 	}
 	c.order.MoveToFront(el)
 	out := make([]byte, len(e.value))
 	copy(out, e.value)
-	return out, true, nil
+	return out, true, c.seq, nil
 }
 
 // Set stores value under key, links it to the given tags, and applies
-// an optional TTL (zero means no expiry).
-func (c *Cache) Set(_ context.Context, key string, value []byte, tags []string, ttl time.Duration) error {
+// an optional TTL (zero means no expiry) — unless a tag was invalidated
+// after seq.
+func (c *Cache) Set(_ context.Context, key string, value []byte, tags []string, ttl time.Duration, seq int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for _, t := range tags {
+		if c.inv[t] > seq {
+			return nil
+		}
+	}
 	if el, ok := c.items[key]; ok {
 		c.removeLocked(el)
 	}
@@ -111,7 +122,9 @@ func (c *Cache) Set(_ context.Context, key string, value []byte, tags []string, 
 func (c *Cache) Invalidate(_ context.Context, tags []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.seq++
 	for _, t := range tags {
+		c.inv[t] = c.seq
 		keys := c.tags[t]
 		for k := range keys {
 			if el, ok := c.items[k]; ok {

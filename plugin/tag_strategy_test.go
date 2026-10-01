@@ -51,7 +51,8 @@ func TestWithTagStrategy_OverridesBuiltinDerivation(t *testing.T) {
 
 	var u testUser
 	require.NoError(t, db.First(&u, 1).Error)
-	assert.Equal(t, 1, strategy.readCalls, "a cache miss should invoke the strategy's ReadTags")
+	// Once, before the lookup: the tags come from the query alone.
+	assert.Equal(t, 1, strategy.readCalls, "a cache miss should invoke the strategy's ReadTags once")
 
 	// The custom tag must actually be the one registered in the cache —
 	// invalidating it should evict the entry.

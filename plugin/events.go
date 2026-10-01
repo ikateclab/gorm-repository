@@ -19,8 +19,9 @@ const (
 	EventError      EventKind = "error"
 )
 
-// Event is one cache decision. SQL is set on misses; Reason on skips,
-// errors and invalidations (create/update/delete).
+// Event is one cache decision. Tags are the read's on lookups and stores, the
+// write's on invalidations; SQL is set on misses; Reason on skips, errors and
+// invalidations (create/update/delete).
 type Event struct {
 	Kind   EventKind
 	Model  string
@@ -47,8 +48,8 @@ func (p *Plugin) emit(ctx context.Context, e Event) {
 	}
 }
 
-func (p *Plugin) set(ctx context.Context, key, model string, data []byte, tags []string, ttl time.Duration) error {
-	if err := p.cache.Set(ctx, key, data, tags, ttl); err != nil {
+func (p *Plugin) set(ctx context.Context, key, model string, data []byte, tags []string, ttl time.Duration, seq int64) error {
+	if err := p.cache.Set(ctx, key, data, tags, ttl, seq); err != nil {
 		p.emit(ctx, Event{Kind: EventError, Model: model, Key: key, Reason: "set", Err: err})
 		return err
 	}
