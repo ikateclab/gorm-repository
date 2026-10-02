@@ -78,16 +78,15 @@ func TestEvents_BypassIsSkip(t *testing.T) {
 	assert.Equal(t, "bypass", rec.last(EventSkip).Reason)
 }
 
-func TestEvents_NotFoundIsSkip(t *testing.T) {
+func TestEvents_NotFoundIsStored(t *testing.T) {
 	rec := &testRecorder{}
 	db, mc, _ := setupCachedDB(t, WithEventRecorder(rec))
 
 	var u testUser
 	assert.ErrorIs(t, db.First(&u, 99).Error, gorm.ErrRecordNotFound)
 
-	assert.Equal(t, []EventKind{EventMiss, EventSkip}, rec.kinds())
-	assert.Equal(t, "query-error", rec.last(EventSkip).Reason)
-	assert.Equal(t, 0, mc.Len())
+	assert.Equal(t, []EventKind{EventMiss, EventSet}, rec.kinds())
+	assert.Equal(t, 1, mc.Len())
 }
 
 func TestEvents_InvalidateCarriesReasonAndTags(t *testing.T) {

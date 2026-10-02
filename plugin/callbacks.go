@@ -1,8 +1,10 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"reflect"
 	"time"
@@ -145,6 +147,12 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 		p.options.metrics.Hit(label)
 		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key, Tags: tags})
 		db.RowsAffected = countRows(db.Statement.Dest)
+		if bytes.Equal(data, notFound) {
+			db.RowsAffected = 0
+			if db.Statement.RaiseErrorOnNotFound {
+				_ = db.AddError(gorm.ErrRecordNotFound)
+			}
+		}
 		// GORM's processor logs stmt.SQL unconditionally after this callback
 		// returns, whenever it's non-empty — regardless of whether a real
 		// query ran. BuildQuerySQL above populated it just to derive the
@@ -160,6 +168,10 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 	p.emit(ctx, Event{Kind: EventMiss, Model: label, Key: key, Tags: tags, SQL: db.Statement.SQL.String()})
 	p.execAndCache(db, key, label, tags, seq, true)
 }
+
+// notFound is what a First/Take/Last that found nothing stores: the hit
+// raises gorm.ErrRecordNotFound again, like the query would.
+var notFound = []byte("null")
 
 // execAndCache executes the already-built query, scans results, and —
 // when populate is set — caches them under tags and seq. This mirrors
@@ -187,20 +199,21 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, seq
 	if p.cache == nil || !populate {
 		return
 	}
-	if db.Error != nil {
-		// Includes gorm.ErrRecordNotFound: not-found results are never cached.
-		p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Err: db.Error})
-		return
-	}
-
-	// Marshal and cache the result.
-	data, err := json.Marshal(db.Statement.Dest)
-	if err != nil {
-		if p.options.debug {
-			log.Printf("[cache] marshal error for %s: %v", key, err)
+	// A not-found is cached too: the read's tags cover the row that may come.
+	data := notFound
+	if !errors.Is(db.Error, gorm.ErrRecordNotFound) {
+		if db.Error != nil {
+			p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Tags: tags, Err: db.Error})
+			return
 		}
-		p.emit(db.Statement.Context, Event{Kind: EventError, Model: label, Key: key, Reason: "marshal", Err: err})
-		return
+		var err error
+		if data, err = json.Marshal(db.Statement.Dest); err != nil {
+			if p.options.debug {
+				log.Printf("[cache] marshal error for %s: %v", key, err)
+			}
+			p.emit(db.Statement.Context, Event{Kind: EventError, Model: label, Key: key, Reason: "marshal", Err: err})
+			return
+		}
 	}
 
 	ctx := db.Statement.Context
