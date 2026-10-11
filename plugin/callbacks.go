@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"log"
 	"reflect"
 	"regexp"
@@ -23,6 +24,12 @@ const (
 	// commitOrRollbackName is GORM's callback that commits the implicit
 	// per-write transaction (when SkipDefaultTransaction is off).
 	commitOrRollbackName = "gorm:commit_or_rollback_transaction"
+
+	// maxReadAge bounds how long after its lookup a read may still store
+	// its result: a backend only remembers invalidations for a while, so
+	// an older read can't be checked against them.
+	maxReadAge        = time.Minute
+	invalidateTimeout = 2 * time.Second
 )
 
 // registerCallbacks wires query/create/update/delete/raw callbacks into db.
@@ -212,33 +219,49 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 	ctx := db.Statement.Context
 	label := modelLabel(db.Statement)
 
-	// Try cache.
-	data, hit, err := p.cache.Get(ctx, key)
+	// A read's tags come from the query alone. With none, nothing could
+	// invalidate its entry: it runs past the cache, without a lookup.
+	tags := p.readTags(db, schemaVer)
+	if len(tags) == 0 {
+		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "no-tags"})
+		runQuery(db)
+		return
+	}
+
+	data, hit, versions, err := p.cache.Get(ctx, key, tags)
 	if err != nil {
 		if p.options.debug {
 			log.Printf("[cache] Get error for %s: %v", key, err)
 		}
-		p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "get", Err: err})
-		// Fall through to DB.
-		p.execAndCache(db, key, label, schemaVer)
+		p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "get", Tags: tags, Err: err})
+		// Fall through to DB, without caching: there are no versions to
+		// store under.
+		runQuery(db)
 		return
 	}
 
 	if hit {
-		if err := decode(data, db.Statement.Dest); err != nil {
+		found, err := decode(data, db.Statement.Dest)
+		if err != nil {
 			if p.options.debug {
 				log.Printf("[cache] decode error for %s: %v", key, err)
 			}
-			p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "decode", Err: err})
+			p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "decode", Tags: tags, Err: err})
 			// Corrupted — reset whatever the failed decode wrote, then
 			// run the actual query and re-cache.
 			resetDest(db.Statement.Dest)
-			p.execAndCache(db, key, label, schemaVer)
+			p.execAndCache(db, key, label, tags, versions)
 			return
 		}
 		p.options.metrics.Hit(label)
-		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key})
+		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key, Tags: tags})
 		db.RowsAffected = countRows(db.Statement.Dest)
+		if !found {
+			db.RowsAffected = 0
+			if db.Statement.RaiseErrorOnNotFound {
+				_ = db.AddError(gorm.ErrRecordNotFound)
+			}
+		}
 		// GORM's processor logs stmt.SQL unconditionally after this callback
 		// returns, whenever it's non-empty — regardless of whether a real
 		// query ran. BuildQuerySQL above populated it just to derive the
@@ -251,8 +274,8 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 
 	// Cache miss.
 	p.options.metrics.Miss(label)
-	p.emit(ctx, Event{Kind: EventMiss, Model: label, Key: key, SQL: db.Statement.SQL.String()})
-	p.execAndCache(db, key, label, schemaVer)
+	p.emit(ctx, Event{Kind: EventMiss, Model: label, Key: key, Tags: tags, SQL: db.Statement.SQL.String()})
+	p.execAndCache(db, key, label, tags, versions)
 }
 
 // runQuery executes the already-built query and scans the results,
@@ -279,47 +302,50 @@ func runQuery(db *gorm.DB) {
 }
 
 // execAndCache executes the already-built query, scans results, and
-// populates the cache.
-func (p *Plugin) execAndCache(db *gorm.DB, key, label, schemaVer string) {
+// caches them under tags and the versions the lookup returned.
+func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, versions Versions) {
 	if db.DryRun || db.Error != nil {
 		return
 	}
+	readAt := time.Now()
 	runQuery(db)
 
 	if p.cache == nil {
 		return
 	}
-	if db.Error != nil {
-		// Includes gorm.ErrRecordNotFound: not-found results are never cached.
-		p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Err: db.Error})
-		return
-	}
-
 	ctx := db.Statement.Context
-	if _, inTx := txState(db); inTx && ResolveTxMode(db, p.options.defaultTxMode) != TxFull {
-		// A value read inside a transaction can be overtaken by another
-		// transaction's committed write before this one ends; storing it
-		// (now or at commit) could re-cache that stale snapshot.
-		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "tx-read"})
-		return
-	}
 
-	data, err := encode(db.Statement.Dest)
-	if err != nil {
-		if p.options.debug {
-			log.Printf("[cache] encode error for %s: %v", key, err)
+	// A not-found is cached too: the read's tags cover the row that may come.
+	data := notFound
+	if !errors.Is(db.Error, gorm.ErrRecordNotFound) {
+		if db.Error != nil {
+			p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Tags: tags, Err: db.Error})
+			return
 		}
-		p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "encode", Err: err})
+		var err error
+		if data, err = encode(db.Statement.Dest); err != nil {
+			if p.options.debug {
+				log.Printf("[cache] encode error for %s: %v", key, err)
+			}
+			p.emit(ctx, Event{Kind: EventError, Model: label, Key: key, Reason: "encode", Tags: tags, Err: err})
+			return
+		}
+	}
+
+	if _, inTx := txState(db); inTx && ResolveTxMode(db, p.options.defaultTxMode) != TxFull {
+		// Never stored, now or at commit: under REPEATABLE READ or
+		// SERIALIZABLE the transaction's snapshot can predate an
+		// invalidation that versions already include, so the value could
+		// be stale even though nothing invalidated it afterwards.
+		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "tx-read", Tags: tags})
+		return
+	}
+	if time.Since(readAt) > maxReadAge {
+		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "slow-read", Tags: tags})
 		return
 	}
 
-	var tags []string
-	if p.options.tagStrategy != nil {
-		tags = p.options.tagStrategy.ReadTags(db, schemaVer)
-	} else {
-		tags = p.tagsForStatement(db)
-	}
-	if setErr := p.set(ctx, key, label, data, tags, p.resolveTTL(db)); setErr != nil {
+	if setErr := p.set(ctx, key, label, data, tags, p.resolveTTL(db), versions); setErr != nil {
 		if p.options.debug {
 			log.Printf("[cache] Set error for %s: %v", key, setErr)
 		}
@@ -393,7 +419,9 @@ func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
 		return
 	}
 
-	ctx := db.Statement.Context
+	// A write that already reached the database invalidates even if the
+	// request that made it is gone.
+	ctx := context.WithoutCancel(db.Statement.Context)
 	label := modelLabel(db.Statement)
 
 	// Mark pending writes for dirty-state tracking.
@@ -407,6 +435,8 @@ func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
 	if hook, _ := txState(db); hook != nil {
 		hook.OnCommit(func(commitCtx context.Context) error {
 			p.options.metrics.Invalidation(label, reason)
+			commitCtx, cancel := context.WithTimeout(context.WithoutCancel(commitCtx), invalidateTimeout)
+			defer cancel()
 			err := p.invalidate(commitCtx, label, reason, tags)
 			if err != nil {
 				p.options.metrics.PostCommitError()
@@ -417,11 +447,21 @@ func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
 	}
 
 	p.options.metrics.Invalidation(label, reason)
+	ctx, cancel := context.WithTimeout(ctx, invalidateTimeout)
+	defer cancel()
 	if err := p.invalidate(ctx, label, reason, tags); err != nil {
 		if p.options.debug {
 			log.Printf("[cache] Invalidate error: %v", err)
 		}
 	}
+}
+
+// readTags derives a SELECT's tags from the query alone, before it runs.
+func (p *Plugin) readTags(db *gorm.DB, schemaVer string) []string {
+	if p.options.tagStrategy != nil {
+		return p.options.tagStrategy.ReadTags(db, schemaVer)
+	}
+	return p.tagsForStatement(db)
 }
 
 // tagsForStatement derives cache tags for a SELECT query.

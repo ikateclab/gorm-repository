@@ -2,7 +2,7 @@ package rediscache
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,9 +12,9 @@ import (
 )
 
 // setupRedis starts a real Redis container so these tests exercise the
-// actual wire protocol (SADD/SET/MULTI/SMEMBERS/DEL), not an in-process
-// fake — the whole point of this package is compatibility with what the
-// Node.js backend does over the same Redis connection.
+// actual wire protocol, not an in-process fake — the whole point of this
+// package is compatibility with what the Node.js backend does over the same
+// Redis connection.
 func setupRedis(t *testing.T) *redis.Client {
 	t.Helper()
 	ctx := context.Background()
@@ -38,249 +38,184 @@ func setupRedis(t *testing.T) *redis.Client {
 }
 
 func TestRoundTrip_SetThenGet(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
+	c := New(setupRedis(t))
 	ctx := context.Background()
 
-	require.NoError(t, c.Set(ctx, "k1", []byte(`{"name":"alice"}`), []string{"Contact:1"}, time.Minute))
-
-	data, hit, err := c.Get(ctx, "k1")
-	require.NoError(t, err)
-	require.True(t, hit)
-	require.Equal(t, `{"name":"alice"}`, string(data))
-}
-
-func TestGet_Miss(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-
-	data, hit, err := c.Get(context.Background(), "does-not-exist")
+	_, hit, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
 	require.False(t, hit)
-	require.Nil(t, data)
-}
+	require.NoError(t, c.Set(ctx, "k1", []byte(`{"name":"alice"}`), []string{"Contact:1"}, time.Minute, versions))
 
-func TestInvalidate_RemovesTaggedEntry(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1", "Contact:acc-1:list"}, time.Minute))
-	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
-
-	_, hit, err := c.Get(ctx, "k1")
+	data, hit, _, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
-	require.False(t, hit, "invalidating one of the entry's tags must evict it")
+	require.True(t, hit)
+	require.JSONEq(t, `{"name":"alice"}`, string(data))
 }
 
-func TestInvalidate_UnrelatedEntrySurvives(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
+// Values are opaque bytes (the plugin stores gob), not JSON.
+func TestRoundTrip_BinaryValue(t *testing.T) {
+	c := New(setupRedis(t))
 	ctx := context.Background()
+	value := []byte{'g', 0x00, 0xff, 0x10, '"'}
 
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, time.Minute))
-	require.NoError(t, c.Set(ctx, "k2", []byte("v2"), []string{"Contact:2"}, time.Minute))
-
-	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
-
-	_, hit1, _ := c.Get(ctx, "k1")
-	require.False(t, hit1)
-	data2, hit2, err := c.Get(ctx, "k2")
+	require.NoError(t, c.Set(ctx, "k1", value, []string{"Contact:1"}, time.Minute, nil))
+	data, hit, _, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
-	require.True(t, hit2)
-	require.Equal(t, "v2", string(data2))
+	require.True(t, hit)
+	require.Equal(t, value, data)
 }
 
-func TestInvalidate_MultipleEntriesUnderSameTag(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
+func TestInvalidate_OnlyTheTaggedEntry(t *testing.T) {
+	c := New(setupRedis(t))
 	ctx := context.Background()
-
-	// Two different cached queries both tagged with the same account-list
-	// tag — a single write to that account must evict both, the same way
-	// a write busts every list query cached under the Node backend's
-	// "{Resource}:{accountId}:list" tag.
-	require.NoError(t, c.Set(ctx, "list-a", []byte("[1,2]"), []string{"Contact:acc-1:list"}, time.Minute))
-	require.NoError(t, c.Set(ctx, "list-b", []byte("[3]"), []string{"Contact:acc-1:list", "Contact:no-account:list"}, time.Minute))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1", "Contact:acc-1:list"}, time.Minute, nil))
+	require.NoError(t, c.Set(ctx, "k2", []byte(`2`), []string{"Contact:2"}, time.Minute, nil))
 
 	require.NoError(t, c.Invalidate(ctx, []string{"Contact:acc-1:list"}))
 
-	_, hitA, _ := c.Get(ctx, "list-a")
-	_, hitB, _ := c.Get(ctx, "list-b")
-	require.False(t, hitA)
-	require.False(t, hitB)
+	_, hit1, _, _ := c.Get(ctx, "k1", []string{"Contact:1"})
+	_, hit2, _, _ := c.Get(ctx, "k2", []string{"Contact:2"})
+	require.False(t, hit1)
+	require.True(t, hit2)
 }
 
-func TestInvalidate_TagSetItselfIsCleared(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
+// A read that overlapped a write must not be served, even when the read's
+// Set lands after the write's invalidation.
+func TestSet_ReadOverlappingAWriteIsNeverServed(t *testing.T) {
+	c := New(setupRedis(t))
 	ctx := context.Background()
 
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, time.Minute))
+	_, _, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	require.NoError(t, err)
 	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`"read before the write"`), []string{"Contact:1"}, time.Minute, versions))
 
-	exists, err := client.Exists(ctx, tagPrefix+"Contact:1").Result()
-	require.NoError(t, err)
-	require.Zero(t, exists, "the tag SET itself must be removed, not just the data it pointed to")
-}
-
-func TestWireLayout_MatchesNodeBackend(t *testing.T) {
-	// Regression guard for cross-language compatibility: a write from the
-	// Node backend (or a hand-rolled script standing in for it) manipulates
-	// these exact Redis keys directly — SADD on "tagcache:tag:<tag>", SET
-	// on "tagcache:data:<key>" — so Go's Cache must read/write the same
-	// physical layout, not just tags that happen to look similar.
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "mykey", []byte("hello"), []string{"Contact:1"}, time.Minute))
-
-	raw, err := client.Get(ctx, "tagcache:data:mykey").Result()
-	require.NoError(t, err)
-	require.Equal(t, "hello", raw)
-
-	members, err := client.SMembers(ctx, "tagcache:tag:Contact:1").Result()
-	require.NoError(t, err)
-	require.Equal(t, []string{"mykey"}, members)
-
-	// Simulate a Node-side invalidation touching the same keys directly.
-	require.NoError(t, client.Del(ctx, "tagcache:data:mykey").Err())
-	_, hit, err := c.Get(ctx, "mykey")
-	require.NoError(t, err)
+	_, hit, _, _ := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.False(t, hit)
 }
 
-func TestSet_NoTTL(t *testing.T) {
+// Tags only the result told aren't passed to Get: the entry's own tags are
+// checked on a second round-trip.
+func TestGet_ChecksTagsItWasNotGiven(t *testing.T) {
+	c := New(setupRedis(t))
+	ctx := context.Background()
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:acc-1:list"}, time.Minute, nil))
+
+	_, hit, _, _ := c.Get(ctx, "k1", nil)
+	require.True(t, hit)
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:acc-1:list"}))
+	_, hit, _, _ = c.Get(ctx, "k1", nil)
+	require.False(t, hit)
+}
+
+func TestInvalidate_AllTagDropsEverything(t *testing.T) {
+	c := New(setupRedis(t))
+	ctx := context.Background()
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1"}, time.Minute, nil))
+
+	require.NoError(t, c.Invalidate(ctx, []string{"*"}))
+
+	_, hit, _, _ := c.Get(ctx, "k1", []string{"Contact:1"})
+	require.False(t, hit)
+}
+
+// A version counter that expired and is bumped again must still exceed
+// every version recorded before it expired, or older entries would look
+// valid again.
+func TestBump_MonotonicAcrossCounterExpiry(t *testing.T) {
 	client := setupRedis(t)
 	c := New(client)
 	ctx := context.Background()
 
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), nil, 0))
-
-	ttl, err := client.TTL(ctx, dataPrefix+"k1").Result()
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	_, _, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
-	require.Equal(t, time.Duration(-1), ttl, "ttl<=0 should mean no expiry, matching a falsy timeout in the Node backend")
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1"}, time.Minute, versions))
+
+	require.NoError(t, client.Del(ctx, verPrefix+"Contact:1").Err()) // the counter expires
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+
+	_, hit, _, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	require.NoError(t, err)
+	require.False(t, hit, "a bump after the counter expired must still invalidate older entries")
+}
+
+func TestWireLayout_PerTagVersionCounters(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client)
+	ctx := context.Background()
+
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	v1, err := client.Get(ctx, "cache:ver:Contact:1").Int64()
+	require.NoError(t, err)
+	require.Greater(t, v1, int64(0))
+	ttl, err := client.TTL(ctx, "cache:ver:Contact:1").Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, DefaultMaxTTL)
+	require.LessOrEqual(t, ttl, DefaultMaxTTL+markerSlack)
+
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	v2, err := client.Get(ctx, "cache:ver:Contact:1").Int64()
+	require.NoError(t, err)
+	require.Greater(t, v2, v1)
+
+	require.Zero(t, client.Exists(ctx, "cache:seq").Val(), "no global counter")
+	require.Zero(t, client.Exists(ctx, "cache:ver:Contact:2").Val(), "untouched tags get no counter")
 }
 
 func TestInvalidate_EmptyTagsIsNoop(t *testing.T) {
 	client := setupRedis(t)
-	c := New(client)
-	require.NoError(t, c.Invalidate(context.Background(), nil))
-}
-
-// TestSet_TagSetGetsExpiry guards against unbounded growth: without an
-// expiry of its own, a tag SET keeps every key ever added to it, including
-// ones whose own data-key has long since expired via TTL — for a tag that
-// rarely gets invalidated, that set only ever grows. Refreshing the tag
-// SET's expiry to the same ttl on every Set means a tag nothing touches
-// for a while disappears on its own instead of accumulating forever.
-func TestSet_TagSetGetsExpiry(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, time.Minute))
-
-	ttl, err := client.TTL(ctx, tagPrefix+"Contact:1").Result()
-	require.NoError(t, err)
-	require.Greater(t, ttl, time.Duration(0), "the tag SET itself must expire, not just the data-key")
-	require.LessOrEqual(t, ttl, time.Minute)
-}
-
-// TestSet_NoTTL_TagSetAlsoNeverExpires is TestSet_NoTTL's counterpart for
-// tag SETs: a ttl<=0 data-key (no expiry) must not leave its tag SETs
-// expiring underneath it either.
-func TestSet_NoTTL_TagSetAlsoNeverExpires(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, 0))
-
-	ttl, err := client.TTL(ctx, tagPrefix+"Contact:1").Result()
-	require.NoError(t, err)
-	require.Equal(t, time.Duration(-1), ttl)
-}
-
-// TestSet_RefreshesExistingTagTTL confirms a later Set touching an
-// already-expiring tag pushes its expiry back out, so a tag that keeps
-// getting written to (even under a short-lived entry) doesn't expire out
-// from under still-live members added earlier under a longer one.
-func TestSet_RefreshesExistingTagTTL(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, time.Second))
-	require.NoError(t, c.Set(ctx, "k2", []byte("v2"), []string{"Contact:1"}, time.Hour))
-
-	ttl, err := client.TTL(ctx, tagPrefix+"Contact:1").Result()
-	require.NoError(t, err)
-	require.Greater(t, ttl, time.Minute, "the second Set's longer ttl must have refreshed the tag's expiry")
-}
-
-// TestSet_ShorterTTLDoesNotOrphanEntry: a later, shorter-lived entry under
-// the same tag used to shorten the tag SET's own expiry; once the SET
-// expired, invalidating the tag no longer reached the longer-lived entry.
-func TestSet_ShorterTTLDoesNotOrphanEntry(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "long", []byte("v"), []string{"table:users"}, time.Minute))
-	require.NoError(t, c.Set(ctx, "short", []byte("v"), []string{"table:users"}, time.Second))
-
-	ttl, err := client.TTL(ctx, tagPrefix+"table:users").Result()
-	require.NoError(t, err)
-	require.Greater(t, ttl, 30*time.Second, "a shorter ttl must not shorten the tag SET's expiry")
-
-	time.Sleep(1500 * time.Millisecond)
-	require.NoError(t, c.Invalidate(ctx, []string{"table:users"}))
-
-	_, hit, err := c.Get(ctx, "long")
-	require.NoError(t, err)
-	require.False(t, hit, "the long-lived entry must still be reachable through its tag")
-}
-
-// TestSet_NoTTLEntryMakesExistingTagPersistent: a no-expiry entry joining a
-// tag that already has an expiry must not be left behind when it expires.
-func TestSet_NoTTLEntryMakesExistingTagPersistent(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	require.NoError(t, c.Set(ctx, "k1", []byte("v1"), []string{"Contact:1"}, time.Minute))
-	require.NoError(t, c.Set(ctx, "k2", []byte("v2"), []string{"Contact:1"}, 0))
-
-	ttl, err := client.TTL(ctx, tagPrefix+"Contact:1").Result()
-	require.NoError(t, err)
-	require.Equal(t, time.Duration(-1), ttl)
-
-	// And a later expiring entry must not make it volatile again.
-	require.NoError(t, c.Set(ctx, "k3", []byte("v3"), []string{"Contact:1"}, time.Minute))
-	ttl, err = client.TTL(ctx, tagPrefix+"Contact:1").Result()
-	require.NoError(t, err)
-	require.Equal(t, time.Duration(-1), ttl)
-}
-
-// TestInvalidate_DrainsLargeTagInBatches covers tags with more members than
-// one SPOP batch.
-func TestInvalidate_DrainsLargeTagInBatches(t *testing.T) {
-	client := setupRedis(t)
-	c := New(client)
-	ctx := context.Background()
-
-	n := invalidateBatch*2 + 17
-	for i := 0; i < n; i++ {
-		require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), []byte("v"), []string{"big"}, time.Minute))
-	}
-	require.NoError(t, c.Invalidate(ctx, []string{"big"}))
-
-	keys, err := client.Keys(ctx, dataPrefix+"*").Result()
+	require.NoError(t, New(client).Invalidate(context.Background(), nil))
+	keys, err := client.Keys(context.Background(), "*").Result()
 	require.NoError(t, err)
 	require.Empty(t, keys)
-	exists, err := client.Exists(ctx, tagPrefix+"big").Result()
+}
+
+func TestSet_CapsTTLAtMaxTTL(t *testing.T) {
+	client := setupRedis(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		cache *Cache
+		max   time.Duration
+	}{
+		{New(client), DefaultMaxTTL},
+		{New(client, WithMaxTTL(30*time.Minute)), 30 * time.Minute},
+	} {
+		for _, ttl := range []time.Duration{0, time.Hour} {
+			require.NoError(t, tc.cache.Set(ctx, "k", []byte(`1`), []string{"Contact:1"}, ttl, nil))
+			got, err := client.TTL(ctx, "k").Result()
+			require.NoError(t, err)
+			require.Greater(t, got, tc.max-time.Minute)
+			require.LessOrEqual(t, got, tc.max)
+		}
+	}
+}
+
+func TestWithMaxTTL_StretchesCounterLifetime(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client, WithMaxTTL(time.Hour))
+	ctx := context.Background()
+
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	ttl, err := client.TTL(ctx, "cache:ver:Contact:1").Result()
 	require.NoError(t, err)
-	require.Zero(t, exists)
+	require.Greater(t, ttl, time.Hour, "counters must outlive the longest entry")
+}
+
+func TestReadVersions_UnreadableCounterIsAnError(t *testing.T) {
+	ok := redis.NewStringCmd(context.Background())
+	ok.SetVal("5")
+	missing := redis.NewStringCmd(context.Background())
+	missing.SetErr(redis.Nil)
+	failed := redis.NewStringCmd(context.Background())
+	failed.SetErr(errors.New("shard down"))
+
+	v, err := readVersions([]string{"a", "b"}, []*redis.StringCmd{ok, missing})
+	require.NoError(t, err)
+	require.Equal(t, int64(5), v["a"])
+	require.Zero(t, v["b"])
+
+	_, err = readVersions([]string{"a", "c"}, []*redis.StringCmd{ok, failed})
+	require.Error(t, err)
 }

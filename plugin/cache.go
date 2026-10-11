@@ -13,13 +13,24 @@ import (
 	"time"
 )
 
+// Versions is a backend's snapshot of how far each of a read's tags had
+// been invalidated when the read started (tag -> version; a missing tag
+// counts as 0). Get returns it and Set receives it back unchanged.
+type Versions = map[string]int64
+
 // Cache is the only thing storage backends must implement.
 //
-// Implementations must be safe for concurrent use. Get returning
-// (nil, false, nil) indicates a miss with no error.
+// Implementations must be safe for concurrent use. Get receives the tags
+// the entry is known to depend on before the query runs, and returns their
+// Versions at that moment. Set stores under those versions, and a backend
+// never serves a value one of whose tags was invalidated after them —
+// otherwise a read overlapping a write could cache the pre-write value
+// after the write's invalidation, and serve it until TTL. Versions are
+// tracked per tag, not by one global counter, so no single key is touched
+// by every read and invalidation.
 type Cache interface {
-	Get(ctx context.Context, key string) ([]byte, bool, error)
-	Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration) error
+	Get(ctx context.Context, key string, tags []string) (value []byte, hit bool, versions Versions, err error)
+	Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration, versions Versions) error
 	Invalidate(ctx context.Context, tags []string) error
 }
 
@@ -75,7 +86,8 @@ type options struct {
 }
 
 // WithDefaultTTL sets the default TTL for cached entries. Zero means no
-// expiry.
+// expiry. A backend may clamp it: rediscache caps entries at its
+// WithMaxTTL (13 minutes by default), zero included.
 func WithDefaultTTL(ttl time.Duration) Option {
 	return func(o *options) { o.defaultTTL = ttl }
 }
