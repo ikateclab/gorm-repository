@@ -464,19 +464,57 @@ func stripLeadingComments(sql string) string {
 	}
 }
 
-// execWriteTable returns the unquoted, unqualified table a raw write
-// statement targets, if it can be determined.
-func execWriteTable(sql string) (string, bool) {
-	m := execWriteRe.FindStringSubmatch(stripLeadingComments(sql))
+// truncateListRe captures the table list of a TRUNCATE, which may name
+// several tables, before any Postgres IDENTITY or CASCADE option.
+var truncateListRe = regexp.MustCompile(`(?is)^\s*truncate(?:\s+table)?\s+(.+?)(?:\s+(?:restart|continue|cascade|restrict)\b.*)?\s*;?\s*$`)
+
+// execWriteTables returns the unquoted, unqualified tables a raw write
+// statement targets, if they can be determined: one for INSERT, UPDATE,
+// DELETE and REPLACE, every listed one for TRUNCATE.
+func execWriteTables(sql string) []string {
+	sql = stripLeadingComments(sql)
+	if m := truncateListRe.FindStringSubmatch(sql); m != nil {
+		var tables []string
+		for _, item := range strings.Split(m[1], ",") {
+			// Postgres allows "ONLY t" and "t *" per table.
+			fields := strings.Fields(item)
+			if len(fields) > 1 && strings.EqualFold(fields[0], "only") {
+				fields = fields[1:]
+			}
+			if len(fields) == 0 {
+				continue
+			}
+			if name := unqualifiedTable(strings.TrimSuffix(fields[0], "*")); name != "" {
+				tables = append(tables, name)
+			}
+		}
+		return tables
+	}
+	m := execWriteRe.FindStringSubmatch(sql)
 	if m == nil {
+		return nil
+	}
+	if name := unqualifiedTable(m[1]); name != "" {
+		return []string{name}
+	}
+	return nil
+}
+
+// execWriteTable returns the first table execWriteTables finds.
+func execWriteTable(sql string) (string, bool) {
+	tables := execWriteTables(sql)
+	if len(tables) == 0 {
 		return "", false
 	}
-	name := m[1]
+	return tables[0], true
+}
+
+// unqualifiedTable strips a schema qualifier and identifier quotes.
+func unqualifiedTable(name string) string {
 	if i := strings.LastIndexByte(name, '.'); i >= 0 {
 		name = name[i+1:]
 	}
-	name = strings.Trim(name, "\"`[]")
-	return name, name != ""
+	return strings.Trim(name, "\"`[]")
 }
 
 // execWriteCallback invalidates after a raw statement that writes:
@@ -492,8 +530,8 @@ func (p *Plugin) execWriteCallback(db *gorm.DB) {
 		return
 	}
 	sql := db.Statement.SQL.String()
-	table, ok := execWriteTable(sql)
-	if !ok {
+	tables := execWriteTables(sql)
+	if len(tables) == 0 {
 		if execLooksLikeWriteRe.MatchString(stripLeadingComments(sql)) {
 			p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: "exec-unknown-table", SQL: sql})
 			// Nothing to invalidate, but the transaction is dirty now.
@@ -501,13 +539,14 @@ func (p *Plugin) execWriteCallback(db *gorm.DB) {
 		}
 		return
 	}
-	// The SQL names the table written. Statement.Table may name another:
+	// The SQL names the tables written. Statement.Table may name another:
 	// db.Model(&a).Exec(...), or the Dest a RETURNING scans into.
-	if prev := db.Statement.Table; prev != table {
+	prev := db.Statement.Table
+	defer func() { db.Statement.Table = prev }()
+	for _, table := range tables {
 		db.Statement.Table = table
-		defer func() { db.Statement.Table = prev }()
+		p.invalidateForWrite(db, "exec")
 	}
-	p.invalidateForWrite(db, "exec")
 }
 
 // markPending flags the session's transaction as dirty, if it tracks that.

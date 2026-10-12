@@ -697,3 +697,34 @@ func TestStaleness_PlainGormTx_CommitFresh(t *testing.T) {
 	require.NoError(t, db.First(&u, 1).Error)
 	assert.Equal(t, "after", u.Name)
 }
+
+func TestExecWriteTables_TruncateList(t *testing.T) {
+	cases := map[string][]string{
+		`TRUNCATE a, b`: {"a", "b"},
+		`TRUNCATE TABLE "public"."a", b RESTART IDENTITY`:  {"a", "b"},
+		`truncate only a, only b * cascade;`:               {"a", "b"},
+		"/* tag */ TRUNCATE TABLE `a`":                     {"a"},
+		`UPDATE users SET a = 1`:                           {"users"},
+		`DELETE FROM users WHERE id IN (SELECT id FROM b)`: {"users"},
+	}
+	for sql, want := range cases {
+		assert.Equal(t, want, execWriteTables(sql), sql)
+	}
+	assert.Empty(t, execWriteTables(`SELECT 1`))
+}
+
+// TRUNCATE can list several tables; every one must be invalidated, not
+// just the first. SQLite has no TRUNCATE, so the statement fails, but raw
+// write invalidation runs even when the statement reports an error.
+func TestStaleness_TruncateList_InvalidatesEveryTable(t *testing.T) {
+	db, _, rec := setupWALDB(t)
+
+	_ = db.Exec(`TRUNCATE test_users, secret_accounts`).Error
+
+	var tags []string
+	for _, e := range rec.kindsOf(EventInvalidate) {
+		tags = append(tags, e.Tags...)
+	}
+	assert.Contains(t, tags, "table:test_users")
+	assert.Contains(t, tags, "table:secret_accounts")
+}
