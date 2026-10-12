@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -24,6 +25,9 @@ const (
 
 // Global cache for JSON column types to avoid repeated database queries
 var jsonColumnTypeCache sync.Map
+
+// savepointSeq names nested transactions' savepoints, unique per process.
+var savepointSeq atomic.Uint64
 
 type GormRepository[T any] struct {
 	Repository[T]
@@ -425,6 +429,14 @@ type Tx struct {
 	gtx        *gorm.DB
 	committed  bool
 	rolledBack bool
+
+	// parent and savepoint are set on a nested Tx (see Tx.BeginTransaction):
+	// it runs inside savepoint, on parent's database transaction.
+	parent    *Tx
+	savepoint string
+	// children are the nested Txs begun on this one, settled with it if
+	// still open when it commits or rolls back.
+	children []*Tx
 	// clonedEntities stores cloned entities as snapshots during transaction
 	// key is a unique identifier for the entity, value is the cloned entity snapshot
 	clonedEntities map[string]interface{}
@@ -459,34 +471,73 @@ type pendingTracker interface {
 
 var _ pendingTracker = (*Tx)(nil)
 
-// MarkPending records that a write has happened on this transaction. Called
-// by the cache plugin's write callback.
+// MarkPending records that a write has happened on this transaction, and
+// on every transaction it is nested in: they all see the write. Called by
+// the cache plugin's write callback.
 func (tx *Tx) MarkPending() {
-	tx.mutex.Lock()
-	defer tx.mutex.Unlock()
-	tx.pending = true
+	for t := tx; t != nil; t = t.parent {
+		t.mutex.Lock()
+		t.pending = true
+		t.mutex.Unlock()
+	}
 }
 
 // HasPendingWrites reports whether MarkPending has been called on this
-// transaction since it began.
+// transaction, or on one it is nested in, since it began.
 func (tx *Tx) HasPendingWrites() bool {
-	tx.mutex.RLock()
-	defer tx.mutex.RUnlock()
-	return tx.pending
+	for t := tx; t != nil; t = t.parent {
+		t.mutex.RLock()
+		pending := t.pending
+		t.mutex.RUnlock()
+		if pending {
+			return true
+		}
+	}
+	return false
 }
 
-// BeginTransaction starts a nested transaction.
+// BeginTransaction starts a nested transaction: a savepoint inside tx's
+// database transaction. Committing it releases the savepoint and hands its
+// commit and rollback hooks to tx, so nothing runs until the outermost
+// transaction commits; rolling it back undoes only its own writes and runs
+// its rollback hooks. tx must still be committed or rolled back itself, and
+// doing so settles any nested transaction left open the same way.
 func (tx *Tx) BeginTransaction() *Tx {
-	gtx := tx.gtx.Begin()
+	// The child gets a Session of its own (Context set, so its Statement
+	// and Settings are cloned) to store its hook and tracker on, instead of
+	// overwriting tx's — see setCommitHook. It shares tx's *sql.Tx.
+	gtx := tx.gtx.Session(&gorm.Session{Context: tx.gtx.Statement.Context, NewDB: true})
 	child := &Tx{
 		gtx:            gtx,
-		committed:      false,
-		rolledBack:     false,
+		parent:         tx,
+		savepoint:      fmt.Sprintf("gormrepo_sp_%d", savepointSeq.Add(1)),
 		clonedEntities: make(map[string]interface{}),
 	}
 	setCommitHook(child.gtx, child)
 	setPendingTracker(child.gtx, child)
+	if gtx.Error == nil {
+		// Every later call on the child fails with this error, if any.
+		_ = gtx.AddError(savepointExec(gtx, "SAVEPOINT "+child.savepoint))
+	}
+	tx.mutex.Lock()
+	tx.children = append(tx.children, child)
+	tx.mutex.Unlock()
 	return child
+}
+
+// savepointExec runs a savepoint statement on gtx's transaction. GORM's
+// SavePoint and RollbackTo discard the driver's error, so the statement is
+// run directly, past any prepared-statement wrapper the way GORM does
+// (savepoint commands can't be prepared on every database).
+func savepointExec(gtx *gorm.DB, sql string) error {
+	if _, ok := gtx.Dialector.(gorm.SavePointerDialectorInterface); !ok {
+		return gorm.ErrUnsupportedDriver
+	}
+	db := gtx.Session(&gorm.Session{Context: gtx.Statement.Context, NewDB: true})
+	if prepared, ok := db.Statement.ConnPool.(*gorm.PreparedStmtTX); ok {
+		db.Statement.ConnPool = prepared.Tx
+	}
+	return db.Exec(sql).Error
 }
 
 // OnCommit registers fn to run after the transaction commits successfully.
@@ -503,9 +554,22 @@ func (tx *Tx) OnRollback(fn func()) {
 	tx.rollbackFns = append(tx.rollbackFns, fn)
 }
 
-// Commit commits the transaction and runs registered commit hooks.
+// Commit commits the transaction and runs registered commit hooks. A
+// nested Tx instead releases its savepoint and hands its hooks to its
+// parent: nothing is committed, or invalidated, until the outermost
+// transaction commits.
 func (tx *Tx) Commit() error {
 	if tx.committed || tx.rolledBack {
+		return nil
+	}
+	tx.settleOpenChildren(true)
+
+	if tx.parent != nil {
+		if err := savepointExec(tx.gtx, "RELEASE SAVEPOINT "+tx.savepoint); err != nil {
+			return err
+		}
+		tx.committed = true
+		tx.parent.adoptHooks(tx)
 		return nil
 	}
 
@@ -518,17 +582,66 @@ func (tx *Tx) Commit() error {
 }
 
 // Rollback rolls back the transaction and runs registered rollback hooks.
+// A nested Tx rolls back to its savepoint, undoing only its own writes;
+// its commit hooks are dropped.
 func (tx *Tx) Rollback() error {
 	if tx.committed || tx.rolledBack {
 		return nil
 	}
+	tx.settleOpenChildren(false)
 
-	err := tx.gtx.Rollback().Error
+	var err error
+	if tx.parent != nil {
+		err = savepointExec(tx.gtx, "ROLLBACK TO SAVEPOINT "+tx.savepoint)
+	} else {
+		err = tx.gtx.Rollback().Error
+	}
 	if err == nil {
 		tx.rolledBack = true
+		tx.mutex.Lock()
+		tx.commitFns = nil
+		tx.mutex.Unlock()
 		tx.runRollbackHooks()
 	}
 	return err
+}
+
+// adoptHooks moves a committed child's commit and rollback hooks onto tx:
+// they now run, or are dropped, with tx's own.
+func (tx *Tx) adoptHooks(child *Tx) {
+	child.mutex.Lock()
+	commitFns, rollbackFns := child.commitFns, child.rollbackFns
+	child.commitFns, child.rollbackFns = nil, nil
+	child.mutex.Unlock()
+
+	tx.mutex.Lock()
+	defer tx.mutex.Unlock()
+	tx.commitFns = append(tx.commitFns, commitFns...)
+	tx.rollbackFns = append(tx.rollbackFns, rollbackFns...)
+}
+
+// settleOpenChildren finishes the nested transactions still open on tx the
+// way tx is about to finish: their savepoints sit inside tx's transaction,
+// so its commit or rollback applies to their writes too, and their hooks
+// must run with tx's rather than be lost.
+func (tx *Tx) settleOpenChildren(commit bool) {
+	tx.mutex.Lock()
+	children := tx.children
+	tx.children = nil
+	tx.mutex.Unlock()
+
+	for _, child := range children {
+		if child.committed || child.rolledBack {
+			continue
+		}
+		child.settleOpenChildren(commit)
+		if commit {
+			child.committed = true
+		} else {
+			child.rolledBack = true
+		}
+		tx.adoptHooks(child)
+	}
 }
 
 func (tx *Tx) runCommitHooks() {
