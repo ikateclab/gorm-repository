@@ -35,17 +35,15 @@ func (p *Plugin) cacheKey(stmt *gorm.Statement, schemaVersion string) string {
 
 // buildCacheKey renders "cache:go:{prefix:}{schemaVersion:}{table}:{hash}".
 func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
+	// prefix and schemaVersion are labelled: the readable part can't tell
+	// WithKeyPrefix("x") from WithSchemaVersion("x"), so the hash must.
 	var b strings.Builder
 	b.WriteString(codecVersion)
+	b.WriteString("|prefix=")
+	b.WriteString(strconv.Quote(prefix))
+	b.WriteString("|schema=")
+	b.WriteString(strconv.Quote(schemaVersion))
 	b.WriteByte('|')
-	if prefix != "" {
-		b.WriteString(prefix)
-		b.WriteByte('|')
-	}
-	if schemaVersion != "" {
-		b.WriteString(schemaVersion)
-		b.WriteByte('|')
-	}
 	table := ""
 	if stmt != nil {
 		table = stmt.Table

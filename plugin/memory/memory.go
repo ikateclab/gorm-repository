@@ -143,11 +143,23 @@ func (c *Cache) Invalidate(_ context.Context, tags []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seq++
-	if len(c.inv)+len(tags) > c.maxInv && c.maxInv > 0 {
-		c.pruneInvLocked()
+	track := true
+	if c.maxInv > 0 && len(c.inv)+len(tags) > c.maxInv {
+		if len(tags) > c.maxInv {
+			// More tags than can be tracked at all: forget every tracked
+			// invalidation and refuse any read that started before this
+			// one instead. Costs misses, never a stale store.
+			clear(c.inv)
+			c.floor = c.seq
+			track = false
+		} else {
+			c.pruneInvLocked()
+		}
 	}
 	for _, t := range tags {
-		c.inv[t] = c.seq
+		if track {
+			c.inv[t] = c.seq
+		}
 		keys := c.tags[t]
 		for k := range keys {
 			if el, ok := c.items[k]; ok {
@@ -206,6 +218,9 @@ func (c *Cache) evictIfNeededLocked() {
 // pruneInvLocked forgets the oldest half of the tracked invalidations and
 // raises floor to the newest one forgotten.
 func (c *Cache) pruneInvLocked() {
+	if len(c.inv) == 0 {
+		return
+	}
 	seqs := make([]int64, 0, len(c.inv))
 	for _, s := range c.inv {
 		seqs = append(seqs, s)

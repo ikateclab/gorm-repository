@@ -20,6 +20,7 @@ const (
 	updateAfterName  = "gormrepository:cache:after_update"
 	deleteAfterName  = "gormrepository:cache:after_delete"
 	rawAfterName     = "gormrepository:cache:after_raw"
+	rowAfterName     = "gormrepository:cache:after_row"
 
 	// commitOrRollbackName is GORM's callback that commits the implicit
 	// per-write transaction (when SkipDefaultTransaction is off).
@@ -31,6 +32,10 @@ const (
 	maxReadAge        = time.Minute
 	invalidateTimeout = 2 * time.Second
 )
+
+// nowFunc is the clock execAndCache measures a read's age with; tests
+// swap it to simulate a slow read.
+var nowFunc = time.Now
 
 // registerCallbacks wires query/create/update/delete/raw callbacks into db.
 func (p *Plugin) registerCallbacks(db *gorm.DB) error {
@@ -54,6 +59,11 @@ func (p *Plugin) registerCallbacks(db *gorm.DB) error {
 	// db.Exec runs the Raw chain, not Create/Update/Delete, so raw writes
 	// need their own invalidation hook.
 	if err := db.Callback().Raw().After("gorm:raw").Register(rawAfterName, p.execWriteCallback); err != nil {
+		return err
+	}
+	// db.Raw(...).Scan/Row/Rows run the Row chain, so an UPDATE ...
+	// RETURNING read that way writes too.
+	if err := db.Callback().Row().After("gorm:row").Register(rowAfterName, p.execWriteCallback); err != nil {
 		return err
 	}
 	return nil
@@ -118,6 +128,28 @@ func (p *Plugin) skipReason(db *gorm.DB) string {
 // multiTableTokenRe matches SQL keywords that pull in another relation.
 var multiTableTokenRe = regexp.MustCompile(`(?i)\b(FROM|JOIN)\b`)
 
+// plainTableExprRe matches a TableExpr naming one table, optionally
+// schema-qualified and quoted, as GORM writes it for Table("users"),
+// Table("public.users") or a schema-qualified TableName. The last
+// identifier is captured.
+var plainTableExprRe = regexp.MustCompile("^\\s*(?:(?:\\w+|\"[^\"]+\"|`[^`]+`|\\[[^\\]]+\\])\\.)?(\\w+|\"[^\"]+\"|`[^`]+`|\\[[^\\]]+\\])\\s*$")
+
+// plainTableExpr reports whether stmt reads only the table it is tagged
+// with. GORM sets TableExpr even for a plain Table("users"); anything else
+// there (an alias, a comma join, a subquery) can read another relation, or
+// leave Statement.Table naming the alias instead of the table.
+func plainTableExpr(stmt *gorm.Statement) bool {
+	e := stmt.TableExpr
+	if e == nil {
+		return true
+	}
+	if len(e.Vars) > 0 {
+		return false
+	}
+	m := plainTableExprRe.FindStringSubmatch(e.SQL)
+	return m != nil && strings.Trim(m[1], "\"`[]") == stmt.Table
+}
+
 // uncacheableQuery returns why an already-built query must not be cached,
 // or "" when it may be. Cached entries are tagged with Statement.Table
 // only, so any query that reads another table (joins, subqueries, raw
@@ -129,6 +161,9 @@ func uncacheableQuery(db *gorm.DB, raw bool) string {
 	}
 	if len(stmt.Joins) > 0 {
 		return "joins"
+	}
+	if !plainTableExpr(stmt) {
+		return "table-expr"
 	}
 	// SELECT ... FOR UPDATE/SHARE must reach the database to take its lock.
 	if _, ok := stmt.Clauses["FOR"]; ok {
@@ -185,6 +220,16 @@ func destIsBlank(dest interface{}) bool {
 	return true
 }
 
+// isStructDest reports whether dest holds a single struct (behind any
+// pointers), rather than a slice, map or scalar.
+func isStructDest(dest interface{}) bool {
+	t := reflect.TypeOf(dest)
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t != nil && t.Kind() == reflect.Struct
+}
+
 // queryReplace replaces GORM's default gorm:query callback. On cache hit
 // it deserializes directly into Dest. On miss it executes the DB query
 // (identically to the stock callback) and then caches the result.
@@ -193,14 +238,26 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 		callbacks.Query(db)
 		return
 	}
+	// A DryRun only builds the SQL (for ToSQL, say): a hit would serve
+	// rows instead and clear that SQL.
+	if db.DryRun {
+		callbacks.Query(db)
+		return
+	}
+
+	// db.Raw(...).Find(...) arrives with its SQL already set. It's never
+	// cached, but it may write (UPDATE ... RETURNING): whichever path
+	// below runs it, check it for a write afterwards.
+	raw := db.Statement.SQL.Len() > 0
+	if raw {
+		defer p.execWriteCallback(db)
+	}
+
 	if reason := p.skipReason(db); reason != "" {
 		p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: reason})
 		callbacks.Query(db)
 		return
 	}
-
-	// db.Raw(...).Find(...) arrives with its SQL already set.
-	raw := db.Statement.SQL.Len() > 0
 
 	// Let GORM build the SQL (parse model, apply scopes, build clauses).
 	callbacks.BuildQuerySQL(db)
@@ -241,7 +298,11 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 	}
 
 	if hit {
-		found, err := decode(data, db.Statement.Dest)
+		// Decode into a blank Dest: gob would otherwise decode into the
+		// elements a reused slice still holds, mutating structs the caller
+		// kept from an earlier query and leaking fields this entry omits.
+		resetDest(db.Statement.Dest)
+		found, rows, err := decode(data, db.Statement.Dest)
 		if err != nil {
 			if p.options.debug {
 				log.Printf("[cache] decode error for %s: %v", key, err)
@@ -255,12 +316,14 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 		}
 		p.options.metrics.Hit(label)
 		p.emit(ctx, Event{Kind: EventHit, Model: label, Key: key, Tags: tags})
-		db.RowsAffected = countRows(db.Statement.Dest)
-		if !found {
-			db.RowsAffected = 0
-			if db.Statement.RaiseErrorOnNotFound {
-				_ = db.AddError(gorm.ErrRecordNotFound)
-			}
+		db.RowsAffected = rows
+		if db.Statement.Result != nil {
+			db.Statement.Result.RowsAffected = rows
+		}
+		// Like gorm.Scan: no row raises only for First/Take/Last, whichever
+		// query shape stored the entry (a Find may share their key).
+		if (!found || rows == 0) && db.Statement.RaiseErrorOnNotFound {
+			_ = db.AddError(gorm.ErrRecordNotFound)
 		}
 		// GORM's processor logs stmt.SQL unconditionally after this callback
 		// returns, whenever it's non-empty — regardless of whether a real
@@ -307,7 +370,7 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, ver
 	if db.DryRun || db.Error != nil {
 		return
 	}
-	readAt := time.Now()
+	readAt := nowFunc()
 	runQuery(db)
 
 	if p.cache == nil {
@@ -315,15 +378,21 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, ver
 	}
 	ctx := db.Statement.Context
 
-	// A not-found is cached too: the read's tags cover the row that may come.
-	data := notFound
-	if !errors.Is(db.Error, gorm.ErrRecordNotFound) {
-		if db.Error != nil {
-			p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Tags: tags, Err: db.Error})
-			return
-		}
+	var data []byte
+	switch {
+	case errors.Is(db.Error, gorm.ErrRecordNotFound),
+		db.Error == nil && db.RowsAffected == 0 && isStructDest(db.Statement.Dest):
+		// A not-found is cached too: the read's tags cover the row that
+		// may come. A Find into a struct that matched nothing stores one
+		// as well, or a First/Take sharing its key would be served the
+		// blank struct instead of raising.
+		data = notFound
+	case db.Error != nil:
+		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "query-error", Tags: tags, Err: db.Error})
+		return
+	default:
 		var err error
-		if data, err = encode(db.Statement.Dest); err != nil {
+		if data, err = encode(db.Statement.Dest, db.RowsAffected); err != nil {
 			if p.options.debug {
 				log.Printf("[cache] encode error for %s: %v", key, err)
 			}
@@ -340,7 +409,7 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, ver
 		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "tx-read", Tags: tags})
 		return
 	}
-	if time.Since(readAt) > maxReadAge {
+	if nowFunc().Sub(readAt) > maxReadAge {
 		p.emit(ctx, Event{Kind: EventSkip, Model: label, Key: key, Reason: "slow-read", Tags: tags})
 		return
 	}
@@ -353,10 +422,12 @@ func (p *Plugin) execAndCache(db *gorm.DB, key, label string, tags []string, ver
 }
 
 // writeCallback returns a GORM callback that invalidates cache entries
-// after a successful create/update/delete.
+// after a create/update/delete — even one that reports an error: the write
+// may have reached the database before a later callback (an After* hook,
+// say) failed, and an extra invalidation only costs a miss.
 func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 	return func(db *gorm.DB) {
-		if p.cache == nil || db.Statement == nil || db.Error != nil || db.DryRun {
+		if p.cache == nil || db.Statement == nil || db.DryRun {
 			return
 		}
 		p.invalidateForWrite(db, reason)
@@ -364,17 +435,39 @@ func (p *Plugin) writeCallback(reason string) func(*gorm.DB) {
 }
 
 // execWriteRe captures the target table of a raw INSERT/UPDATE/DELETE/
-// TRUNCATE/REPLACE statement.
-var execWriteRe = regexp.MustCompile(`(?is)^\s*(?:insert\s+(?:or\s+\w+\s+)?into|replace\s+into|update(?:\s+only)?|delete\s+from|truncate(?:\s+table)?(?:\s+only)?)\s+([^\s(,;]+)`)
+// TRUNCATE/REPLACE statement, including MySQL's priority and IGNORE
+// modifiers, SQLite's OR <conflict> and Postgres's ONLY.
+var execWriteRe = regexp.MustCompile(`(?is)^\s*(?:` +
+	`(?:insert|replace)(?:\s+(?:low_priority|delayed|high_priority))?(?:\s+ignore)?(?:\s+or\s+\w+)?\s+into` +
+	`|update(?:\s+(?:only|low_priority))?(?:\s+ignore)?(?:\s+or\s+\w+)?` +
+	`|delete(?:\s+(?:low_priority|quick|ignore))*\s+from(?:\s+only)?` +
+	`|truncate(?:\s+table)?(?:\s+only)?` +
+	`)\s+([^\s(,;]+)`)
 
 // execLooksLikeWriteRe flags raw statements that probably write rows even
 // though execWriteRe couldn't find their table (e.g. a CTE-prefixed write).
-var execLooksLikeWriteRe = regexp.MustCompile(`(?is)^\s*(with|insert|update|delete|truncate|replace|merge)\b`)
+// A WITH counts only if a DML keyword follows, so a CTE read doesn't.
+var execLooksLikeWriteRe = regexp.MustCompile(`(?is)^\s*(?:insert|update|delete|truncate|replace|merge|upsert)\b|^\s*with\b.*\b(?:insert|update|delete|merge)\b`)
+
+// leadingCommentRe matches one block or line comment opening a statement.
+var leadingCommentRe = regexp.MustCompile(`(?s)^\s*(?:/\*.*?\*/|--[^\n]*(?:\n|$))`)
+
+// stripLeadingComments drops the comments a statement opens with (query
+// tags such as /* app=api */), so the write regexes see its first keyword.
+func stripLeadingComments(sql string) string {
+	for {
+		loc := leadingCommentRe.FindStringIndex(sql)
+		if loc == nil {
+			return sql
+		}
+		sql = sql[loc[1]:]
+	}
+}
 
 // execWriteTable returns the unquoted, unqualified table a raw write
 // statement targets, if it can be determined.
 func execWriteTable(sql string) (string, bool) {
-	m := execWriteRe.FindStringSubmatch(sql)
+	m := execWriteRe.FindStringSubmatch(stripLeadingComments(sql))
 	if m == nil {
 		return "", false
 	}
@@ -386,29 +479,53 @@ func execWriteTable(sql string) (string, bool) {
 	return name, name != ""
 }
 
-// execWriteCallback invalidates after a successful db.Exec that writes.
+// execWriteCallback invalidates after a raw statement that writes:
+// db.Exec (the Raw chain), or an UPDATE ... RETURNING run through
+// db.Raw(...).Scan/Row/Rows (the Row chain) or .Find (queryReplace). Like
+// writeCallback, it runs even when the statement reported an error.
+//
+// On the Row chain this runs before the caller has read and closed the
+// rows, so an autocommit write may not have committed yet; db.Exec and
+// .Find have finished with the statement by now.
 func (p *Plugin) execWriteCallback(db *gorm.DB) {
-	if p.cache == nil || db.Statement == nil || db.Error != nil || db.DryRun {
+	if p.cache == nil || db.Statement == nil || db.DryRun {
 		return
 	}
 	sql := db.Statement.SQL.String()
 	table, ok := execWriteTable(sql)
 	if !ok {
-		if execLooksLikeWriteRe.MatchString(sql) {
+		if execLooksLikeWriteRe.MatchString(stripLeadingComments(sql)) {
 			p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: "exec-unknown-table", SQL: sql})
+			// Nothing to invalidate, but the transaction is dirty now.
+			markPending(db)
 		}
 		return
 	}
-	if db.Statement.Table == "" {
+	// The SQL names the table written. Statement.Table may name another:
+	// db.Model(&a).Exec(...), or the Dest a RETURNING scans into.
+	if prev := db.Statement.Table; prev != table {
 		db.Statement.Table = table
+		defer func() { db.Statement.Table = prev }()
 	}
 	p.invalidateForWrite(db, "exec")
+}
+
+// markPending flags the session's transaction as dirty, if it tracks that.
+func markPending(db *gorm.DB) {
+	if pt := lookupPendingTracker(db); pt != nil {
+		pt.MarkPending()
+	}
 }
 
 // invalidateForWrite derives the write's tags and invalidates them: on
 // commit when the surrounding transaction exposes a CommitHook, inline
 // otherwise.
 func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
+	// Mark pending writes for dirty-state tracking, before the no-tags
+	// return: a write nothing is tagged for still changed rows a later
+	// read in this transaction must not be served from the cache.
+	markPending(db)
+
 	var tags []string
 	if p.options.tagStrategy != nil {
 		tags = p.options.tagStrategy.WriteTags(db, p.resolveSchemaVersion(db))
@@ -423,11 +540,6 @@ func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
 	// request that made it is gone.
 	ctx := context.WithoutCancel(db.Statement.Context)
 	label := modelLabel(db.Statement)
-
-	// Mark pending writes for dirty-state tracking.
-	if pt := lookupPendingTracker(db); pt != nil {
-		pt.MarkPending()
-	}
 
 	// Always defer when a hook exists, whatever the TxMode: invalidating
 	// before commit lets a concurrent reader re-cache the old row, which
@@ -526,19 +638,4 @@ func lookupPendingTracker(db *gorm.DB) PendingTracker {
 		}
 	}
 	return nil
-}
-
-// countRows returns the number of rows in dest for RowsAffected on cache hit.
-func countRows(dest interface{}) int64 {
-	if dest == nil {
-		return 0
-	}
-	v := reflect.ValueOf(dest)
-	for v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
-		return int64(v.Len())
-	}
-	return 1
 }

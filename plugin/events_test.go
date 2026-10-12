@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -98,4 +99,69 @@ func TestEvents_InvalidateCarriesReasonAndTags(t *testing.T) {
 	inv := rec.last(EventInvalidate)
 	assert.Equal(t, "create", inv.Reason)
 	assert.NotEmpty(t, inv.Tags)
+}
+
+// A backend that fails is reported and never breaks the query: a Get
+// error falls through to the database without storing, a Set error
+// leaves nothing cached, and an Invalidate error is reported inline, or
+// returned and counted as a PostCommitError when deferred to commit.
+func TestEvents_CacheErrors(t *testing.T) {
+	errDown := errors.New("cache down")
+
+	t.Run("get", func(t *testing.T) {
+		db, sc, mc, rec, met := setupScriptedDB(t, WithDebug(true))
+		require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+		sc.getErr = errDown
+
+		var u testUser
+		require.NoError(t, db.First(&u, 1).Error)
+		assert.Equal(t, "alice", u.Name)
+		e := rec.last(EventError)
+		assert.Equal(t, "get", e.Reason)
+		assert.ErrorIs(t, e.Err, errDown)
+		assert.NotEmpty(t, e.Tags)
+		assert.Zero(t, sc.sets, "no versions to store under")
+		assert.Zero(t, mc.Len())
+		assert.Zero(t, met.misses)
+	})
+
+	t.Run("set", func(t *testing.T) {
+		db, sc, mc, rec, _ := setupScriptedDB(t, WithDebug(true))
+		require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+		sc.setErr = errDown
+
+		var u testUser
+		require.NoError(t, db.First(&u, 1).Error)
+		assert.Equal(t, "alice", u.Name)
+		e := rec.last(EventError)
+		assert.Equal(t, "set", e.Reason)
+		assert.ErrorIs(t, e.Err, errDown)
+		assert.Empty(t, rec.kindsOf(EventSet))
+		assert.Zero(t, mc.Len())
+	})
+
+	t.Run("invalidate inline", func(t *testing.T) {
+		db, sc, _, rec, met := setupScriptedDB(t, WithDebug(true))
+		sc.invalidateErr = errDown
+
+		require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+		e := rec.last(EventError)
+		assert.Equal(t, "invalidate", e.Reason)
+		assert.ErrorIs(t, e.Err, errDown)
+		assert.Empty(t, rec.kindsOf(EventInvalidate))
+		assert.Zero(t, met.postCommitErrors, "nothing was deferred")
+	})
+
+	t.Run("invalidate at commit", func(t *testing.T) {
+		db, sc, _, rec, met := setupScriptedDB(t)
+		require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+		sc.invalidateErr = errDown
+
+		hook := &fakeHook{}
+		require.NoError(t, db.Set(CommitHookKey, CommitHook(hook)).Model(&testUser{ID: 1}).Update("name", "bob").Error)
+		require.Len(t, hook.commits, 1)
+		assert.ErrorIs(t, hook.commits[0](context.Background()), errDown)
+		assert.Equal(t, 1, met.postCommitErrors)
+		assert.Equal(t, "invalidate", rec.last(EventError).Reason)
+	})
 }

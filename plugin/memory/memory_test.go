@@ -201,3 +201,51 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// One Invalidate with more tags than are tracked used to prune an empty
+// map and panic. It must still refuse every older read.
+func TestInvalidate_MoreTagsThanTracked(t *testing.T) {
+	c := New(WithMaxTrackedTags(2))
+	ctx := context.Background()
+
+	_, _, old, _ := c.Get(ctx, "k", []string{"a"})
+	require.NoError(t, c.Set(ctx, "other", []byte("v"), []string{"b"}, 0, nil))
+	require.NotPanics(t, func() {
+		require.NoError(t, c.Invalidate(ctx, []string{"a", "b", "c"}))
+	})
+	assert.LessOrEqual(t, len(c.inv), 2)
+	_, ok, _, _ := c.Get(ctx, "other", nil)
+	assert.False(t, ok, "the entries are still dropped")
+
+	require.NoError(t, c.Set(ctx, "k", []byte("old"), []string{"a"}, 0, old))
+	_, ok, _, _ = c.Get(ctx, "k", nil)
+	assert.False(t, ok, "a read older than the invalidation must be refused")
+
+	// So is one on an unrelated tag: the floor can't tell them apart.
+	require.NoError(t, c.Set(ctx, "k", []byte("old"), []string{"z"}, 0, old))
+	_, ok, _, _ = c.Get(ctx, "k", nil)
+	assert.False(t, ok)
+
+	_, _, fresh, _ := c.Get(ctx, "k", []string{"a"})
+	require.NoError(t, c.Set(ctx, "k", []byte("new"), []string{"a"}, 0, fresh))
+	_, ok, _, _ = c.Get(ctx, "k", nil)
+	assert.True(t, ok)
+}
+
+// Pruning copes with an empty map, and one smaller than what's being added.
+func TestInvalidate_PruneSmallMap(t *testing.T) {
+	c := New(WithMaxTrackedTags(2))
+	ctx := context.Background()
+	require.NotPanics(t, c.pruneInvLocked)
+	assert.Zero(t, c.floor)
+
+	_, _, old, _ := c.Get(ctx, "k", []string{"a"})
+	require.NoError(t, c.Invalidate(ctx, []string{"a"}))
+	require.NotPanics(t, func() {
+		require.NoError(t, c.Invalidate(ctx, []string{"b", "c"}))
+	})
+	assert.LessOrEqual(t, len(c.inv), 2)
+	require.NoError(t, c.Set(ctx, "k", []byte("old"), []string{"a"}, 0, old))
+	_, ok, _, _ := c.Get(ctx, "k", nil)
+	assert.False(t, ok, "a's invalidation was pruned; the older read must still be refused")
+}

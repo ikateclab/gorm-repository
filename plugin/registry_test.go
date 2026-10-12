@@ -96,3 +96,30 @@ func TestRegisterModel_ResolvedWithDBNamingStrategy(t *testing.T) {
 	assert.Equal(t, "reg_audit_log", res.Statement.Table)
 	assert.Equal(t, 42*time.Second, p.resolveTTL(res), "the per-model TTL must apply to real queries")
 }
+
+// RegisterModel[*T] used to call T's value-receiver TableName on a nil
+// *T, and panicked. It now registers the same table as RegisterModel[T].
+func TestRegisterModel_PointerType(t *testing.T) {
+	var p *Plugin
+	require.NotPanics(t, func() {
+		p = New(nil,
+			RegisterModel[*regUser](ModelWithBypass()),
+			RegisterModel[**regAuditLog](ModelWithTTL(time.Second)),
+		)
+	})
+	mo, ok := p.LookupModel("reg_users")
+	require.True(t, ok)
+	assert.True(t, mo.Bypass)
+	mo, ok = p.LookupModel("reg_audit_logs")
+	require.True(t, ok)
+	assert.Equal(t, time.Second, mo.TTL)
+
+	// Initialize resolves it against the DB's namer like a plain T.
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		NamingStrategy: schema.NamingStrategy{SingularTable: true},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Use(p))
+	_, ok = p.LookupModel("reg_audit_log")
+	assert.True(t, ok)
+}
