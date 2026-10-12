@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,21 @@ type nestedTxWidget struct {
 }
 
 func (nestedTxWidget) TableName() string { return "nested_tx_widgets" }
+
+// Clone and Diff make nestedTxWidget Diffable, for UpdateById's
+// snapshot-based diffs across nested transactions.
+func (w *nestedTxWidget) Clone() *nestedTxWidget {
+	c := *w
+	return &c
+}
+
+func (w *nestedTxWidget) Diff(old *nestedTxWidget) map[string]interface{} {
+	diff := map[string]interface{}{}
+	if w.Name != old.Name {
+		diff["name"] = w.Name
+	}
+	return diff
+}
 
 type nestedTxEnv struct {
 	db   *gorm.DB
@@ -335,3 +352,112 @@ func TestNestedTx_SavepointErrors(t *testing.T) {
 
 // noSavepointDialector hides the wrapped dialector's savepoint support.
 type noSavepointDialector struct{ gorm.Dialector }
+
+// A nested Tx updating an entity its parent loaded must diff against the
+// parent's snapshot. Against a blank entity, a change to a zero value
+// (here Name -> "") produced no diff and was silently never written.
+func TestNestedTx_ChildDiffsAgainstParentSnapshot(t *testing.T) {
+	forEachNestedTxDB(t, func(t *testing.T, e nestedTxEnv) {
+		id := e.create(t, "before")
+		parent := e.repo.BeginTransaction()
+		w, err := e.repo.FindById(e.ctx, id, WithTx(parent))
+		require.NoError(t, err)
+
+		child := parent.BeginTransaction()
+		w.Name = ""
+		require.NoError(t, e.repo.UpdateById(e.ctx, id, w, WithTx(child)))
+		require.NoError(t, child.Commit())
+		require.NoError(t, parent.Commit())
+
+		assert.Equal(t, "", e.stored(t, id))
+	})
+}
+
+// A committed child's snapshots pass to its parent, so the parent's later
+// updates of an entity only the child loaded still diff correctly.
+func TestNestedTx_CommittedChildSnapshotsPassToParent(t *testing.T) {
+	forEachNestedTxDB(t, func(t *testing.T, e nestedTxEnv) {
+		id := e.create(t, "before")
+		parent := e.repo.BeginTransaction()
+		child := parent.BeginTransaction()
+		w, err := e.repo.FindById(e.ctx, id, WithTx(child))
+		require.NoError(t, err)
+		require.NoError(t, child.Commit())
+
+		w.Name = ""
+		require.NoError(t, e.repo.UpdateById(e.ctx, id, w, WithTx(parent)))
+		require.NoError(t, parent.Commit())
+
+		assert.Equal(t, "", e.stored(t, id))
+	})
+}
+
+// ROLLBACK TO keeps a savepoint; a rolled-back child releases it, so a long
+// transaction doesn't accumulate one per rolled-back child.
+func TestNestedTx_RolledBackSavepointReleased(t *testing.T) {
+	forEachNestedTxDB(t, func(t *testing.T, e nestedTxEnv) {
+		parent := e.repo.BeginTransaction()
+		child := parent.BeginTransaction()
+		require.NoError(t, child.Rollback())
+
+		err := savepointExec(parent.gtx, "ROLLBACK TO SAVEPOINT "+child.savepoint)
+		assert.Error(t, err, "the savepoint must be gone")
+		require.NoError(t, parent.Rollback())
+	})
+}
+
+// Concurrent Commit/Rollback calls finish the Tx exactly once. Run with
+// -race: the state they share used to be read and written unguarded.
+func TestTx_ConcurrentFinish_RunsHooksOnce(t *testing.T) {
+	forEachNestedTxDB(t, func(t *testing.T, e nestedTxEnv) {
+		tx := e.repo.BeginTransaction()
+		var commits, rollbacks atomic.Int32
+		tx.OnCommit(func(context.Context) error { commits.Add(1); return nil })
+		tx.OnRollback(func() { rollbacks.Add(1) })
+
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func(commit bool) {
+				defer wg.Done()
+				if commit {
+					assert.NoError(t, tx.Commit())
+				} else {
+					assert.NoError(t, tx.Rollback())
+				}
+			}(i%2 == 0)
+		}
+		wg.Wait()
+
+		assert.Equal(t, int32(1), commits.Load()+rollbacks.Load())
+		assert.True(t, tx.isFinished())
+	})
+}
+
+// A failed outermost commit ends the database transaction, so its rollback
+// hooks run, its commit hooks don't, and the error is returned. Cancelling
+// the transaction's context makes database/sql roll it back and fail
+// Commit, on any driver.
+func TestTx_FailedCommit_RunsRollbackHooks(t *testing.T) {
+	forEachNestedTxDB(t, func(t *testing.T, e nestedTxEnv) {
+		ctx, cancel := context.WithCancel(context.Background())
+		repo := &GormRepository[nestedTxWidget]{DB: e.db.WithContext(ctx)}
+
+		tx := repo.BeginTransaction()
+		var commits, rollbacks int
+		tx.OnCommit(func(context.Context) error { commits++; return nil })
+		tx.OnRollback(func() { rollbacks++ })
+		child := tx.BeginTransaction()
+		child.OnRollback(func() { rollbacks++ })
+		require.NoError(t, child.Commit())
+
+		cancel()
+		require.Error(t, tx.Commit())
+		assert.Zero(t, commits)
+		assert.Equal(t, 2, rollbacks, "the parent's and the adopted child's rollback hooks")
+
+		require.NoError(t, tx.Commit(), "the Tx is finished")
+		require.NoError(t, tx.Rollback())
+		assert.Equal(t, 2, rollbacks)
+	})
+}

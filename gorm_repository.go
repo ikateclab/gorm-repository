@@ -426,9 +426,13 @@ func WithQueryStruct(query map[string]interface{}) Option {
 }
 
 type Tx struct {
-	gtx        *gorm.DB
+	gtx *gorm.DB
+	// committed and rolledBack are guarded by mutex; finishMu serializes
+	// Commit and Rollback, so concurrent calls finish the Tx (and run its
+	// hooks) exactly once.
 	committed  bool
 	rolledBack bool
+	finishMu   sync.Mutex
 
 	// parent and savepoint are set on a nested Tx (see Tx.BeginTransaction):
 	// it runs inside savepoint, on parent's database transaction.
@@ -557,9 +561,12 @@ func (tx *Tx) OnRollback(fn func()) {
 // Commit commits the transaction and runs registered commit hooks. A
 // nested Tx instead releases its savepoint and hands its hooks to its
 // parent: nothing is committed, or invalidated, until the outermost
-// transaction commits.
+// transaction commits. If the outermost commit fails, the database
+// transaction is over anyway, so its rollback hooks run instead.
 func (tx *Tx) Commit() error {
-	if tx.committed || tx.rolledBack {
+	tx.finishMu.Lock()
+	defer tx.finishMu.Unlock()
+	if tx.isFinished() {
 		return nil
 	}
 	tx.settleOpenChildren(true)
@@ -568,49 +575,77 @@ func (tx *Tx) Commit() error {
 		if err := savepointExec(tx.gtx, "RELEASE SAVEPOINT "+tx.savepoint); err != nil {
 			return err
 		}
-		tx.committed = true
-		tx.parent.adoptHooks(tx)
+		tx.markFinished(true)
+		tx.parent.adopt(tx, true)
 		return nil
 	}
 
-	err := tx.gtx.Commit().Error
-	if err == nil {
-		tx.committed = true
-		tx.runCommitHooks()
+	if err := tx.gtx.Commit().Error; err != nil {
+		// A failed COMMIT ends the transaction (database/sql won't retry
+		// it, and Postgres aborts it), so nothing was committed.
+		tx.markFinished(false)
+		tx.runRollbackHooks()
+		return err
 	}
-	return err
+	tx.markFinished(true)
+	tx.runCommitHooks()
+	return nil
 }
 
 // Rollback rolls back the transaction and runs registered rollback hooks.
 // A nested Tx rolls back to its savepoint, undoing only its own writes;
 // its commit hooks are dropped.
 func (tx *Tx) Rollback() error {
-	if tx.committed || tx.rolledBack {
+	tx.finishMu.Lock()
+	defer tx.finishMu.Unlock()
+	if tx.isFinished() {
 		return nil
 	}
 	tx.settleOpenChildren(false)
 
-	var err error
 	if tx.parent != nil {
-		err = savepointExec(tx.gtx, "ROLLBACK TO SAVEPOINT "+tx.savepoint)
-	} else {
-		err = tx.gtx.Rollback().Error
+		if err := savepointExec(tx.gtx, "ROLLBACK TO SAVEPOINT "+tx.savepoint); err != nil {
+			return err
+		}
+		// ROLLBACK TO keeps the savepoint; release it so a long transaction
+		// doesn't accumulate one per rolled-back child. Best-effort: the
+		// rollback itself already took effect.
+		_ = savepointExec(tx.gtx, "RELEASE SAVEPOINT "+tx.savepoint)
+	} else if err := tx.gtx.Rollback().Error; err != nil {
+		return err
 	}
-	if err == nil {
-		tx.rolledBack = true
-		tx.mutex.Lock()
-		tx.commitFns = nil
-		tx.mutex.Unlock()
-		tx.runRollbackHooks()
-	}
-	return err
+	tx.markFinished(false)
+	tx.runRollbackHooks()
+	return nil
 }
 
-// adoptHooks moves a committed child's commit and rollback hooks onto tx:
-// they now run, or are dropped, with tx's own.
-func (tx *Tx) adoptHooks(child *Tx) {
+// isFinished reports whether tx has been committed or rolled back.
+func (tx *Tx) isFinished() bool {
+	tx.mutex.RLock()
+	defer tx.mutex.RUnlock()
+	return tx.committed || tx.rolledBack
+}
+
+// markFinished records how tx finished. A rolled-back Tx drops its commit
+// hooks (and snapshots): none of its writes survive.
+func (tx *Tx) markFinished(committed bool) {
+	tx.mutex.Lock()
+	defer tx.mutex.Unlock()
+	if committed {
+		tx.committed = true
+		return
+	}
+	tx.rolledBack = true
+	tx.commitFns = nil
+	tx.clonedEntities = map[string]interface{}{}
+}
+
+// adopt moves a finished child's commit and rollback hooks onto tx: they
+// now run, or are dropped, with tx's own. A committed child's entity
+// snapshots move up too, so tx diffs later updates against them.
+func (tx *Tx) adopt(child *Tx, committed bool) {
 	child.mutex.Lock()
-	commitFns, rollbackFns := child.commitFns, child.rollbackFns
+	commitFns, rollbackFns, clones := child.commitFns, child.rollbackFns, child.clonedEntities
 	child.commitFns, child.rollbackFns = nil, nil
 	child.mutex.Unlock()
 
@@ -618,6 +653,11 @@ func (tx *Tx) adoptHooks(child *Tx) {
 	defer tx.mutex.Unlock()
 	tx.commitFns = append(tx.commitFns, commitFns...)
 	tx.rollbackFns = append(tx.rollbackFns, rollbackFns...)
+	if committed {
+		for k, v := range clones {
+			tx.clonedEntities[k] = v
+		}
+	}
 }
 
 // settleOpenChildren finishes the nested transactions still open on tx the
@@ -631,16 +671,13 @@ func (tx *Tx) settleOpenChildren(commit bool) {
 	tx.mutex.Unlock()
 
 	for _, child := range children {
-		if child.committed || child.rolledBack {
-			continue
+		child.finishMu.Lock()
+		if !child.isFinished() {
+			child.settleOpenChildren(commit)
+			child.markFinished(commit)
+			tx.adopt(child, commit)
 		}
-		child.settleOpenChildren(commit)
-		if commit {
-			child.committed = true
-		} else {
-			child.rolledBack = true
-		}
-		tx.adoptHooks(child)
+		child.finishMu.Unlock()
 	}
 }
 
@@ -672,7 +709,7 @@ func (tx *Tx) runRollbackHooks() {
 // Use this for simple cases where you don't need complex error handling
 // Will commit if err is nil, rollback if err is set
 func (tx *Tx) Finish(err *error) {
-	if tx.committed || tx.rolledBack {
+	if tx.isFinished() {
 		return
 	}
 
@@ -702,12 +739,20 @@ func (tx *Tx) storeClonedEntity(entityKey string, original interface{}) {
 	tx.clonedEntities[entityKey] = original
 }
 
-// getClonedEntity retrieves the original entity if it was cloned
+// getClonedEntity retrieves the original entity if it was cloned, on tx or
+// on a transaction it is nested in: a nested Tx updating an entity its
+// parent loaded must diff against the parent's snapshot, not a blank one
+// (which would silently drop changes to zero values).
 func (tx *Tx) getClonedEntity(entityKey string) (interface{}, bool) {
-	tx.mutex.RLock()
-	defer tx.mutex.RUnlock()
-	original, exists := tx.clonedEntities[entityKey]
-	return original, exists
+	for t := tx; t != nil; t = t.parent {
+		t.mutex.RLock()
+		original, exists := t.clonedEntities[entityKey]
+		t.mutex.RUnlock()
+		if exists {
+			return original, true
+		}
+	}
+	return nil, false
 }
 
 // generateEntityKey creates a unique key for an entity based on its type and Id
