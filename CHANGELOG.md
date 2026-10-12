@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Query caching plugin** (`plugin`), with in-memory (`plugin/memory`) and Redis (`plugin/rediscache`) backends:
+  - tag-based invalidation on creates, updates, deletes, `db.Exec` and raw `UPDATE … RETURNING`;
+  - read-overlap protection through per-tag invalidation versions (`cache:ver:{tag}` in Redis);
+  - transaction modes (`TxBypass`, `TxDeferred`, `TxFull`), with invalidation deferred to commit for the repository's `Tx`;
+  - per-model settings (`RegisterModel`), key namespaces (`WithKeyPrefix`), schema versions, metrics and event recording;
+  - a configurable Redis entry cap (`rediscache.WithMaxTTL`, 15 minutes by default).
+- **Nested transactions**: `Tx.BeginTransaction` creates a savepoint. Committing it hands its hooks to the parent; rolling it back undoes only its own writes.
+- Pull-request CI (`.github/workflows/test.yml`): `go mod tidy` check, `gofmt`, `go vet` and `go test -race`.
+- Cache and codec benchmarks.
+
+### Changed
+- `Tx.Commit` and `Tx.Rollback` are safe to call concurrently and finish the transaction, running its hooks, exactly once.
+- A failed outermost `Tx.Commit` marks the transaction rolled back and runs its rollback hooks; it still returns the error.
+
+### Fixed
+- `Tx.BeginTransaction` on a `Tx` used to fail while still sharing the parent's transaction, so committing the child committed the parent.
+- `UpdateById` in a nested transaction diffed against a blank entity, silently dropping changes to zero values; it now uses the snapshot an ancestor took.
+
 ## [1.0.0] - 2024-12-19
 
 ### Added
