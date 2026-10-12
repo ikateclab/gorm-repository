@@ -86,8 +86,8 @@ type options struct {
 }
 
 // WithDefaultTTL sets the default TTL for cached entries. Zero means no
-// expiry. A backend may clamp it: rediscache caps entries at its
-// WithMaxTTL (13 minutes by default), zero included.
+// expiry. A backend may clamp it: rediscache caps entries at 15 minutes
+// by default (zero included), which rediscache.WithMaxTTL changes.
 func WithDefaultTTL(ttl time.Duration) Option {
 	return func(o *options) { o.defaultTTL = ttl }
 }

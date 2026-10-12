@@ -36,8 +36,9 @@ const (
 	verPrefix = "cache:ver:"
 	// allTag is on every entry: invalidating it drops the whole cache.
 	allTag = "*"
-	// DefaultMaxTTL caps entries unless WithMaxTTL says otherwise.
-	DefaultMaxTTL = 13 * time.Minute
+	// DefaultMaxTTL is the default cap on how long an entry lives; raise or
+	// lower it with WithMaxTTL.
+	DefaultMaxTTL = 15 * time.Minute
 	// markerSlack is how much longer than the longest entry a version
 	// counter outlives its last bump. It must exceed the time between a
 	// read's Get and its Set (the plugin drops Sets older than a minute).
@@ -65,10 +66,11 @@ type entry struct {
 // Option configures a Cache.
 type Option func(*Cache)
 
-// WithMaxTTL caps how long an entry lives (default DefaultMaxTTL). Every
-// entry is clamped to it, a requested TTL of 0 ("no expiry") included,
-// because version counters only outlive entries by markerSlack; a longer
-// cap keeps counters around longer too.
+// WithMaxTTL sets how long an entry may live, replacing the 15-minute
+// DefaultMaxTTL. Every entry is clamped to it, a requested TTL of 0 ("no
+// expiry") included: version counters only outlive the longest entry by
+// markerSlack, and an entry outliving its tags' counters could be served
+// as valid after they expire. A longer cap keeps counters around longer.
 func WithMaxTTL(d time.Duration) Option {
 	return func(c *Cache) {
 		if d > 0 {
