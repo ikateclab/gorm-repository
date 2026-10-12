@@ -17,7 +17,7 @@ import (
 // actual wire protocol, not an in-process fake — the whole point of this
 // package is compatibility with what the Node.js backend does over the same
 // Redis connection.
-func setupRedis(t *testing.T) *redis.Client {
+func setupRedis(t testing.TB) *redis.Client {
 	t.Helper()
 	ctx := context.Background()
 

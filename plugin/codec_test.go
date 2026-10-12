@@ -2,8 +2,10 @@ package plugin
 
 import (
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -175,4 +177,74 @@ func TestCodec_NotFoundHitEmptiesReusedSlice(t *testing.T) {
 	require.ErrorIs(t, db.Where("id = ?", 9).First(&users).Error, gorm.ErrRecordNotFound)
 	require.Equal(t, 1, met.hits)
 	assert.Empty(t, users)
+}
+
+type codecBenchRow struct {
+	Id        [16]byte
+	Name      string
+	Email     string
+	Status    string
+	Score     int
+	CreatedAt time.Time
+}
+
+// BenchmarkCodec shows what encoding a result costs on a miss and decoding
+// it costs on a hit, for one row and for a 100-row list. JSON, the codec
+// gob replaced (it dropped json:"-" fields), is there for reference.
+//
+//	go test -run '^$' -bench BenchmarkCodec -benchmem ./plugin/
+func BenchmarkCodec(b *testing.B) {
+	one := codecBenchRow{Name: "user", Email: "user@example.com", Status: "active", Score: 7, CreatedAt: time.Now()}
+	list := make([]codecBenchRow, 100)
+	for i := range list {
+		list[i] = one
+		list[i].Score = i
+	}
+
+	for _, c := range []struct {
+		name string
+		v    interface{}
+		dest func() interface{}
+	}{
+		{"one", &one, func() interface{} { return &codecBenchRow{} }},
+		{"list100", &list, func() interface{} { return &[]codecBenchRow{} }},
+	} {
+		data, err := encode(c.v, 1)
+		require.NoError(b, err)
+		jsonData, err := json.Marshal(c.v)
+		require.NoError(b, err)
+
+		b.Run(c.name+"/encode-gob", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := encode(c.v, 1); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(c.name+"/decode-gob", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, _, err := decode(data, c.dest()); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(c.name+"/encode-json", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := json.Marshal(c.v); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(c.name+"/decode-json", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if err := json.Unmarshal(jsonData, c.dest()); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
