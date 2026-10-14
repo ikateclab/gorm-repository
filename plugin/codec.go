@@ -3,21 +3,21 @@ package plugin
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"math"
 	"reflect"
-	"time"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // codecVersion is mixed into CacheKey's hash, so entries written by a
 // different encoding are never decoded by this one.
-const codecVersion = "gob3"
+const codecVersion = "mp1"
 
 // Every cached payload starts with one of these bytes.
 const (
-	payloadValue    byte = 'g' // the query's RowsAffected (uvarint), then the gob-encoded Dest
+	payloadValue    byte = 'g' // the query's RowsAffected (uvarint), then the msgpack-encoded Dest
 	payloadNotFound byte = 'n' // a query that found nothing into a single struct (First/Take/Last, Find)
 )
 
@@ -25,18 +25,17 @@ const (
 // gorm.ErrRecordNotFound again when the query asks for it (First/Take/Last).
 var notFound = []byte{payloadNotFound}
 
-func init() {
-	// Types that commonly sit behind interface{} in jsonb-backed fields
-	// (e.g. map[string]interface{} decoded from JSON).
-	gob.Register(map[string]interface{}{})
-	gob.Register([]interface{}{})
-	gob.Register(time.Time{})
-}
-
-// encode serializes a query result for the cache. gob is used instead of
-// encoding/json because it ignores json tags: a field hidden from API
+// encode serializes a query result for the cache. msgpack is used instead
+// of encoding/json because it ignores json tags: a field hidden from API
 // output with json:"-" (or reshaped by a MarshalJSON method) must still
-// round-trip exactly as gorm.Scan populated it.
+// round-trip exactly as gorm.Scan populated it. Unlike encoding/gob it
+// also keeps a non-nil pointer to a zero value (*bool -> false) and an
+// empty-but-not-nil slice, both of which gorm.Scan produces.
+//
+// It serializes the Go value, so a type with no exported fields (e.g. a
+// Scanner column backed by private fields, like a decimal) would cache as
+// an empty value; gorm.Scan fills exported fields, so models are safe, but
+// such a column type must not be cached without its own msgpack.Marshaler.
 //
 // rowsAffected is stored too: it can't be recomputed from v (a grouped
 // Count scans one row per group into a single *int64), and a hit must
@@ -48,16 +47,18 @@ func encode(v interface{}, rowsAffected int64) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte(payloadValue)
 	buf.Write(binary.AppendUvarint(nil, uint64(rowsAffected)))
-	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
+	b, err := msgpack.Marshal(v)
+	if err != nil {
 		return nil, err
 	}
+	buf.Write(b)
 	return buf.Bytes(), nil
 }
 
-// decode deserializes a cached result into dest, which must be blank
-// (see destIsBlank and resetDest): gob doesn't transmit zero-valued
-// fields, and decodes into whatever elements a slice already holds.
-// found is false for a cached not-found, which leaves dest untouched.
+// decode deserializes a cached result into dest, which must be blank (see
+// destIsBlank and resetDest): a slice is decoded into fresh elements, not
+// the ones it already holds. found is false for a cached not-found, which
+// leaves dest untouched.
 func decode(data []byte, dest interface{}) (found bool, rowsAffected int64, err error) {
 	if len(data) == 0 {
 		return false, 0, errors.New("cache: empty payload")
@@ -70,7 +71,7 @@ func decode(data []byte, dest interface{}) (found bool, rowsAffected int64, err 
 		if size <= 0 || n > math.MaxInt64 {
 			return false, 0, errors.New("cache: malformed row count")
 		}
-		return true, int64(n), gob.NewDecoder(bytes.NewReader(data[1+size:])).Decode(dest)
+		return true, int64(n), msgpack.Unmarshal(data[1+size:], dest)
 	default:
 		return false, 0, fmt.Errorf("cache: unknown payload marker %q", data[0])
 	}
@@ -78,8 +79,8 @@ func decode(data []byte, dest interface{}) (found bool, rowsAffected int64, err 
 
 // resetDest zeroes the value dest ultimately points to, keeping any
 // intermediate pointers intact so Statement.ReflectValue still aliases it.
-// A slice becomes nil, so gob allocates fresh elements instead of decoding
-// into ones the caller may still hold from an earlier query.
+// A slice becomes nil, so the decoder allocates fresh elements instead of
+// decoding into ones the caller may still hold from an earlier query.
 func resetDest(dest interface{}) {
 	v := reflect.ValueOf(dest)
 	for v.Kind() == reflect.Ptr && !v.IsNil() {

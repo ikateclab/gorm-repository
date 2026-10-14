@@ -116,9 +116,9 @@ func (p *Plugin) skipReason(db *gorm.DB) string {
 	if isMapDest(db.Statement.Dest) {
 		return "map-dest"
 	}
-	// gob omits zero-valued fields, and gorm.Scan leaves fields the query
-	// didn't select untouched — so a pre-populated Dest would leak its
-	// values into the cached payload (and vice versa on a hit).
+	// gorm.Scan leaves fields the query didn't select untouched, so a
+	// pre-populated Dest would leak its values into the cached payload
+	// (and vice versa on a hit).
 	if !destIsBlank(db.Statement.Dest) {
 		return "dest-not-blank"
 	}
@@ -298,7 +298,7 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 	}
 
 	if hit {
-		// Decode into a blank Dest: gob would otherwise decode into the
+		// Decode into a blank Dest: the decoder would otherwise reuse the
 		// elements a reused slice still holds, mutating structs the caller
 		// kept from an earlier query and leaking fields this entry omits.
 		resetDest(db.Statement.Dest)

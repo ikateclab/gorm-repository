@@ -1,9 +1,7 @@
 package plugin
 
 import (
-	"database/sql/driver"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -15,18 +13,14 @@ import (
 func TestDecode_Errors(t *testing.T) {
 	valid, err := encode(&testUser{ID: 1, Name: "a"}, 1)
 	require.NoError(t, err)
-	type other struct{ Unrelated []float64 }
-	mismatched, err := encode(&other{Unrelated: []float64{1}}, 1)
-	require.NoError(t, err)
 
 	cases := map[string][]byte{
 		"empty payload":      nil,
 		"unknown marker":     []byte("x"),
 		"no row count":       {payloadValue},
 		"overlong row count": append([]byte{payloadValue}, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01),
-		"garbage gob":        {payloadValue, 0x01, 0xde, 0xad, 0xbe, 0xef},
-		"truncated gob":      valid[:len(valid)-3],
-		"mismatched type":    mismatched,
+		"garbage payload":    {payloadValue, 0x01, 0xde, 0xad, 0xbe, 0xef},
+		"truncated payload":  valid[:len(valid)-3],
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -47,51 +41,41 @@ func TestDecode_NotFoundLeavesDestUntouched(t *testing.T) {
 }
 
 func TestEncode_Errors(t *testing.T) {
-	// gob refuses nil pointers inside a slice.
-	_, err := encode([]*testUser{nil}, 1)
+	// A value msgpack can't serialize is served from the database, not cached.
+	_, err := encode(func() {}, 1)
 	assert.Error(t, err)
 
-	_, err = encode(func() {}, 1)
-	assert.Error(t, err)
+	// A nil pointer inside a slice round-trips (encoding/gob refused it).
+	data, err := encode([]*testUser{nil}, 1)
+	require.NoError(t, err)
+	var got []*testUser
+	_, _, err = decode(data, &got)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Nil(t, got[0])
 }
 
-// opaqueName scans and stores like a string column but has no exported
-// fields, which gob can't encode.
-type opaqueName struct{ v string }
-
-func (o *opaqueName) Scan(src interface{}) error {
-	o.v = fmt.Sprint(src)
-	return nil
-}
-
-func (o opaqueName) Value() (driver.Value, error) { return o.v, nil }
-
-type opaqueRow struct {
-	ID   uint `gorm:"primarykey"`
-	Name opaqueName
-}
-
-func (opaqueRow) TableName() string { return "opaque_rows" }
-
-// A result gob can't encode is served from the database and never stored.
-func TestCodec_EncodeErrorIsNotCached(t *testing.T) {
-	db, mc, rec := setupWALDB(t)
-	require.NoError(t, db.AutoMigrate(&opaqueRow{}))
-	require.NoError(t, db.Create(&opaqueRow{ID: 1, Name: opaqueName{v: "a"}}).Error)
-	before := mc.Len()
-	rec.reset()
-
-	for i := 0; i < 2; i++ {
-		var row opaqueRow
-		require.NoError(t, db.First(&row, 1).Error)
-		assert.Equal(t, "a", row.Name.v)
+// A non-nil pointer to a zero value and an empty-but-not-nil slice survive
+// the round-trip; encoding/gob dropped both to nil.
+func TestEncode_KeepsPointerZeroAndEmptySlice(t *testing.T) {
+	type row struct {
+		Flag *bool
+		Num  *int
+		Tags []string
 	}
-	errs := rec.kindsOf(EventError)
-	require.Len(t, errs, 2)
-	assert.Equal(t, "encode", errs[0].Reason)
-	assert.Error(t, errs[0].Err)
-	assert.Empty(t, rec.kindsOf(EventHit))
-	assert.Equal(t, before, mc.Len())
+	no, zero := false, 0
+	data, err := encode(&row{Flag: &no, Num: &zero, Tags: []string{}}, 1)
+	require.NoError(t, err)
+
+	var got row
+	_, _, err = decode(data, &got)
+	require.NoError(t, err)
+	require.NotNil(t, got.Flag)
+	assert.False(t, *got.Flag)
+	require.NotNil(t, got.Num)
+	assert.Zero(t, *got.Num)
+	require.NotNil(t, got.Tags)
+	assert.Empty(t, got.Tags)
 }
 
 // A corrupt entry is reported, then replaced by a fresh read.
@@ -189,8 +173,9 @@ type codecBenchRow struct {
 }
 
 // BenchmarkCodec shows what encoding a result costs on a miss and decoding
-// it costs on a hit, for one row and for a 100-row list. JSON, the codec
-// gob replaced (it dropped json:"-" fields), is there for reference.
+// it costs on a hit, for one row and for a 100-row list. JSON, which the
+// cache can't use because it reshapes json:"-" fields, is there for
+// reference.
 //
 //	go test -run '^$' -bench BenchmarkCodec -benchmem ./plugin/
 func BenchmarkCodec(b *testing.B) {
@@ -214,7 +199,7 @@ func BenchmarkCodec(b *testing.B) {
 		jsonData, err := json.Marshal(c.v)
 		require.NoError(b, err)
 
-		b.Run(c.name+"/encode-gob", func(b *testing.B) {
+		b.Run(c.name+"/encode-msgpack", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				if _, err := encode(c.v, 1); err != nil {
@@ -222,7 +207,7 @@ func BenchmarkCodec(b *testing.B) {
 				}
 			}
 		})
-		b.Run(c.name+"/decode-gob", func(b *testing.B) {
+		b.Run(c.name+"/decode-msgpack", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				if _, _, err := decode(data, c.dest()); err != nil {
