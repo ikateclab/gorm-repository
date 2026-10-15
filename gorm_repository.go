@@ -80,7 +80,9 @@ func (r *GormRepository[T]) FindPaginated(ctx context.Context, page int, pageSiz
 	var totalRows int64
 
 	db := applyOptions(r.DB, options).WithContext(ctx)
-	db.Model(&entities).Count(&totalRows)
+	if err := db.Model(&entities).Count(&totalRows).Error; err != nil {
+		return nil, err
+	}
 
 	offset := (page - 1) * pageSize
 	if err := db.Offset(offset).Limit(pageSize).Find(&entities).Error; err != nil {

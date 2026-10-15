@@ -2,6 +2,7 @@ package gormrepository
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -258,6 +259,37 @@ func TestIntegration_PaginationWithLargeDataset(t *testing.T) {
 	}
 	if len(activePage1.Data) != 5 {
 		t.Errorf("Expected 5 items on filtered page, got %d", len(activePage1.Data))
+	}
+}
+
+func TestIntegration_PaginationCountError(t *testing.T) {
+	db := setupIntegrationDB(t)
+	userRepo := &GormRepository[tests.TestUser]{DB: db}
+	ctx := context.Background()
+
+	user := tests.NewTestUserBuilder().WithEmail("count-error@example.com").Build()
+	if err := userRepo.Create(ctx, user); err != nil {
+		t.Fatalf("Failed to create test user: %v", err)
+	}
+
+	// Fail only the COUNT query (GORM's Count runs the query callbacks with an
+	// *int64 destination), so the following Find would still succeed.
+	countErr := errors.New("count failed")
+	err := db.Callback().Query().Before("gorm:query").Register("test:fail_count", func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Dest.(*int64); ok {
+			tx.AddError(countErr)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Failed to register callback: %v", err)
+	}
+
+	result, err := userRepo.FindPaginated(ctx, 1, 10)
+	if !errors.Is(err, countErr) {
+		t.Fatalf("Expected count error, got err=%v result=%+v", err, result)
+	}
+	if result != nil {
+		t.Errorf("Expected nil result on count error, got %+v", result)
 	}
 }
 
