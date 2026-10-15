@@ -15,7 +15,12 @@ This file provides guidance for AI coding agents working in this repository.
 ├── gorm_repository_test.go     # Integration tests using Testcontainers + PostgreSQL
 ├── integration_test.go         # Integration tests using SQLite in-memory
 ├── benchmark_test.go           # Benchmark tests using SQLite in-memory
+├── tx_cache_test.go            # Cache plugin + Tx integration (deferred invalidation, hooks)
+├── tx_nested_test.go           # Nested transactions (savepoints) on SQLite and PostgreSQL
 ├── go.mod / go.sum             # Module definition and dependency lock
+├── plugin/                     # Optional GORM query-cache plugin; must not import the root package
+│   ├── memory/                 # In-process cache backend
+│   └── rediscache/             # Redis backend; Testcontainers tests, end-to-end benchmarks
 ├── utils/
 │   ├── camel_case_naming_strategy.go  # GORM Namer that preserves camelCase column names
 │   ├── entity_to_map.go               # Reflection-based struct→map for field-mask updates
@@ -104,6 +109,9 @@ All entities use `uuid.UUID` (from `github.com/google/uuid`) with the GORM tag `
 | `gorm_repository_test.go` | PostgreSQL via Testcontainers | Requires Docker; tests JSONB and full PG feature set |
 | `integration_test.go` | SQLite in-memory | Fast; no external dependencies |
 | `benchmark_test.go` | SQLite in-memory | Use `-bench=.` flag |
+| `tx_cache_test.go`, `tx_nested_test.go` | SQLite, plus PostgreSQL for nested transactions | Root package: `TestMain` still starts PostgreSQL, so Docker is required |
+| `plugin/*_test.go`, `plugin/memory/*_test.go` | SQLite | No Docker needed |
+| `plugin/rediscache/*_test.go` | Redis (and PostgreSQL for benchmarks) via Testcontainers | Requires Docker |
 
 - Use the builder helpers in `utils/tests/test_helpers.go` (`TestUserBuilder`, `SetupTestDBWithConfig`, `CleanupTestDB`) when writing new tests.
 - Prefer adding SQLite integration tests for new generic behaviour and PostgreSQL tests only when the feature is PostgreSQL-specific (e.g., JSONB operations).
@@ -116,4 +124,4 @@ All entities use `uuid.UUID` (from `github.com/google/uuid`) with the GORM tag `
 
 ## CI / Release
 
-Tests run as part of the release pipeline (`.github/workflows/release.yml`) triggered by a `v*` tag push. There is no separate PR CI workflow. Always ensure `go test ./...` passes locally before pushing release tags.
+Pull requests and pushes to `main` run `.github/workflows/test.yml`: a `go mod tidy` check, `gofmt`, `go vet` and `go test -race ./...`. Tests and benchmarks also run in the release pipeline (`.github/workflows/release.yml`), triggered by a `v*` tag push.

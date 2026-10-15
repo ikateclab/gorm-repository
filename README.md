@@ -16,6 +16,7 @@ A generic repository pattern implementation for GORM with advanced features incl
 - **Association Management**: Append, remove, and replace entity associations
 - **Flexible Querying**: Functional options for customizing queries
 - **Utilities**: CamelCase naming strategy and entity-to-map conversion
+- **Query Caching**: Optional GORM plugin with in-memory and Redis backends, tag-based invalidation and transaction-aware semantics
 
 ## Installation
 
@@ -151,6 +152,14 @@ if err != nil {
 }
 
 err = userRepo.Create(ctx, user2, gr.WithTx(tx))
+
+// Nested transactions use savepoints
+child := tx.BeginTransaction()
+if err := userRepo.Create(ctx, user3, gr.WithTx(child)); err != nil {
+    child.Rollback() // undoes only the child's writes
+} else {
+    child.Commit() // released into tx: committed (or rolled back) with it
+}
 ```
 
 ### Advanced Querying
@@ -246,20 +255,103 @@ updateMap, err := utils.EntityToMap(fields, user)
 // Returns: map[string]interface{}{"name": "John", "email": "john@example.com", "age": 25}
 ```
 
+## Query Caching
+
+The `plugin` package is an optional GORM plugin that caches query results and invalidates them on writes. It works on any `*gorm.DB`, including the one behind a repository, and calling code doesn't change.
+
+```go
+import (
+    "github.com/ikateclab/gorm-repository/plugin"
+    "github.com/ikateclab/gorm-repository/plugin/memory"
+    "github.com/ikateclab/gorm-repository/plugin/rediscache"
+)
+
+// In-process: tests, or a single instance.
+var cache plugin.Cache = memory.New(memory.WithMaxEntries(10_000))
+// Or shared across instances, with any redis.UniversalClient:
+cache = rediscache.New(redisClient)
+
+err := db.Use(plugin.New(cache,
+    plugin.WithDefaultTTL(10*time.Minute),
+    plugin.WithKeyPrefix("billing-api"), // keeps services sharing a cache apart
+    plugin.RegisterModel[User](plugin.ModelWithTTL(2*time.Minute)),
+    plugin.RegisterModel[AuditLog](plugin.ModelWithBypass()),
+))
+```
+
+Other options: `WithDefaultTTLFunc` (e.g. jittered TTLs), `WithDefaultTxMode`, `WithSchemaVersion` (bump to drop every entry after a migration), `WithScopeColumns`, `ModelWithExtraTags`, `WithTagStrategy`, `WithMetrics` and `WithEventRecorder`. Per call, `plugin.Bypass(db)` skips the cache and `plugin.WithTxMode(db, mode)` overrides the transaction mode.
+
+### How invalidation works
+
+- Each cached result is tagged with the table it read (`table:users`), plus any tags from `WithScopeColumns`, `ModelWithExtraTags`, entities implementing `CacheTaggable`, or a custom `TagStrategy`.
+- Creates, updates and deletes invalidate the tags of what they wrote. So do raw writes: `db.Exec(...)`, and `UPDATE … RETURNING` run through `db.Raw(...)`.
+- A read that overlaps a write is never cached: the backend notes each tag's invalidation version when the read starts, and refuses an entry whose tags were invalidated since.
+- Not-found results are cached too, and a hit raises `gorm.ErrRecordNotFound` again for `First`/`Take`/`Last`.
+
+### What always goes to the database
+
+- Queries that may read a table their tag doesn't cover: joins, subqueries, `EXISTS`/`UNION`, raw SQL (`db.Raw(...).Find`) and aliased or multi-table `Table(...)` expressions.
+- Locking reads (`FOR UPDATE` / `FOR SHARE`) and `DryRun` statements.
+- Destinations that are maps or already-populated structs.
+- Models registered with `ModelWithBypass()`, and sessions marked with `plugin.Bypass(db)`.
+
+### Transactions
+
+Inside the repository's `Tx`, invalidation always waits for the commit, and a rollback invalidates nothing. Nested transactions hand their invalidations to their parent, so they run when the outermost transaction commits. Reads follow the transaction mode:
+
+| Mode | Reads inside a transaction | Results read inside it are cached |
+|---|---|---|
+| `TxBypass` (default) | always go to the database | no |
+| `TxDeferred` | served from the cache until the transaction writes | no |
+| `TxFull` | served from the cache until the transaction writes | yes (unsafe: can cache a stale snapshot) |
+
+Plain GORM transactions (`db.Transaction`, `db.Begin`) give the plugin no commit hook: reads inside them skip the cache, but their writes invalidate before the commit, leaving a short window in which a concurrent reader can re-cache the old row. Use the repository's `Tx` where that matters.
+
+### Redis backend
+
+- Requires Redis 5 or newer, with server clocks roughly in sync (NTP). Single nodes, Cluster and Ring all work, through any `redis.UniversalClient`.
+- Entries live at most 15 minutes by default, whatever TTL the plugin asks for (including 0, "no expiry"). Change the cap with `rediscache.New(client, rediscache.WithMaxTTL(d))`. It exists because each tag's invalidation counter (`cache:ver:{tag}`) expires shortly after the longest entry could, and an entry outliving its counters could otherwise be served as valid.
+- To share Redis with the Node.js backend, both sides must bump the `cache:ver:{tag}` counters the same way (see `bumpScript` in `plugin/rediscache/rediscache.go`); otherwise writes from one side don't invalidate the other's entries. Each side keeps its own data keys (`cache:go:…` here).
+- Entries are stored in a compact binary envelope. Ones written in the JSON envelope earlier versions used read as misses and are rewritten by the next read, so while a rolling deploy runs both versions, a key the other version wrote last costs a miss.
+
+> **Note:** the Node.js side of the `cache:ver:{tag}` format hasn't been confirmed yet.
+
+### Known limitations
+
+- Plain GORM transactions invalidate before their commit (see above).
+- An autocommit `UPDATE … RETURNING` read through `db.Raw(...).Rows()` or `.Row()` invalidates just before the database commits it: GORM hands back the raw rows, so there's nothing to hook when they close.
+
+### Overhead
+
+Indicative medians from `go test -run '^$' -bench . -benchmem ./plugin/ ./plugin/rediscache/`, with Postgres 16 and Redis 7 both running locally (4 vCPU, 2.1 GHz Xeon):
+
+| Operation | No cache | With cache |
+|---|---|---|
+| Find by id, hit | 122 µs | Redis 73 µs · memory 8 µs |
+| Find by id, miss | 122 µs | Redis 286 µs |
+| Find 100 rows, hit | 494 µs | Redis 184 µs |
+| Update (invalidates) | 691 µs | Redis 927 µs |
+
+Both servers being local, their round trips cost about the same, so a hit saves more against a remote or busy database than shown here. A miss pays a cache lookup and a store on top of the query. A hit served from memory costs about 8 µs in all, decoding included.
+
 ## Requirements
 
 - Go 1.24+
 - GORM v1.30+
 - UUID support via `github.com/google/uuid`
+- Redis 5+ for the Redis cache backend
+- Docker to run the full test suite
 
 ## Testing
 
-The package includes comprehensive tests with integration tests and benchmarks:
+The package includes comprehensive tests with integration tests and benchmarks. The full suite needs Docker: PostgreSQL and Redis run via Testcontainers.
 
 ```bash
 go test ./...
 go test -bench=. ./...
 ```
+
+Pull requests run `go vet`, a `gofmt` check and `go test -race ./...` in CI (`.github/workflows/test.yml`).
 
 ## License
 

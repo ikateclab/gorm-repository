@@ -490,6 +490,47 @@ func TestGormRepository_Transaction_Rollback(t *testing.T) {
 	require.Equal(t, int64(0), count, "Expected 0 users after rollback")
 }
 
+// TestGormRepository_Transaction_NoStateLeakBetweenCalls is a regression
+// test for a bug where BeginTransaction() reassigned tx.gtx to the result
+// of tx.gtx.Set(commitHookKey, tx) — and (*gorm.DB).Set always returns a
+// clone==0 *gorm.DB (gorm's getInstance() never sets that field on the
+// struct literal it builds). With tx.gtx stuck at clone==0, every later
+// WithTx(tx) call (itself another .Set()) skipped cloning and mutated
+// tx.gtx's ONE shared Statement in place instead of getting an isolated
+// copy — so Preloads/Where/Selects set by one repository call leaked into
+// every later call sharing the same tx, regardless of model. Concretely:
+// a WithRelations("Profile") query on TestUser, followed — same tx — by a
+// plain FindById on TestSimpleEntity (which has no Profile relation at
+// all), failed with "Profile: unsupported relations for schema
+// TestSimpleEntity".
+func TestGormRepository_Transaction_NoStateLeakBetweenCalls(t *testing.T) {
+	db := setupTestDB(t)
+	userRepo := &GormRepository[tests.TestUser]{DB: db}
+	entityRepo := &GormRepository[tests.TestSimpleEntity]{DB: db}
+	ctx := context.Background()
+
+	user := createTestUser()
+	require.NoError(t, userRepo.Create(ctx, user))
+	entity := &tests.TestSimpleEntity{Id: uuid.New(), Value: "v"}
+	require.NoError(t, entityRepo.Create(ctx, entity))
+
+	var err error
+	tx := userRepo.BeginTransaction()
+	defer tx.Finish(&err)
+
+	// This query registers a "Profile" preload on the shared tx.
+	_, err = userRepo.FindById(ctx, user.Id, WithTx(tx), WithRelations("Profile"))
+	require.NoError(t, err)
+
+	// TestSimpleEntity has no "Profile" relation — if the transaction's
+	// underlying *gorm.DB leaked the previous call's Preloads, this fails
+	// with "Profile: unsupported relations for schema TestSimpleEntity"
+	// instead of returning the row.
+	found, err := entityRepo.FindById(ctx, entity.Id, WithTx(tx))
+	require.NoError(t, err, "a later call on an unrelated model must not inherit an earlier call's Preloads")
+	require.Equal(t, entity.Id, found.Id)
+}
+
 func TestGormRepository_Transaction_Finish_Success(t *testing.T) {
 	db := setupTestDB(t)
 	repo := &GormRepository[tests.TestUser]{DB: db}
