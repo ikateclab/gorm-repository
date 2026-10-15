@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,6 +110,73 @@ func TestTxDeferred_ReadAfterWriteInSameTx_NeverStale(t *testing.T) {
 	final, err := repo.FindById(ctx, id)
 	require.NoError(t, err)
 	assert.Equal(t, "after", final.Name)
+}
+
+// txCacheTestGadget is a second table, for writes that dirty only one.
+type txCacheTestGadget struct {
+	Id   uuid.UUID `gorm:"primarykey"`
+	Name string
+}
+
+func (txCacheTestGadget) TableName() string { return "tx_cache_test_gadgets" }
+
+type hitRecorder struct{ hits atomic.Int32 }
+
+func (r *hitRecorder) Record(_ context.Context, e plugin.Event) {
+	if e.Kind == plugin.EventHit {
+		r.hits.Add(1)
+	}
+}
+
+// A write dirties only its own table: later in the same transaction, a
+// read of another table is still served from the cache, one of the
+// written table goes to the database.
+func TestTxDeferred_PendingWritesArePerTable(t *testing.T) {
+	rec := &hitRecorder{}
+	db, widgets := setupTxCacheDB(t, plugin.WithEventRecorder(rec))
+	require.NoError(t, db.AutoMigrate(&txCacheTestGadget{}))
+	gadgets := &GormRepository[txCacheTestGadget]{DB: db}
+	ctx := context.Background()
+
+	widgetId, gadgetId := uuid.New(), uuid.New()
+	require.NoError(t, widgets.Create(ctx, &txCacheTestWidget{Id: widgetId, Name: "before"}))
+	require.NoError(t, gadgets.Create(ctx, &txCacheTestGadget{Id: gadgetId, Name: "gadget"}))
+	_, err := widgets.FindById(ctx, widgetId)
+	require.NoError(t, err)
+	_, err = gadgets.FindById(ctx, gadgetId)
+	require.NoError(t, err)
+
+	tx := widgets.BeginTransaction()
+	require.NoError(t, widgets.UpdateById(ctx, widgetId, &txCacheTestWidget{Id: widgetId, Name: "after"}, WithTx(tx)))
+	rec.hits.Store(0)
+
+	_, err = gadgets.FindById(ctx, gadgetId, WithTx(tx))
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, rec.hits.Load(), "a table the transaction didn't write is served from the cache")
+
+	widget, err := widgets.FindById(ctx, widgetId, WithTx(tx))
+	require.NoError(t, err)
+	assert.Equal(t, "after", widget.Name)
+	assert.EqualValues(t, 1, rec.hits.Load(), "the written table is read from the database")
+
+	require.NoError(t, tx.Commit())
+}
+
+func TestTx_HasPendingWrites(t *testing.T) {
+	_, repo := setupTxCacheDB(t)
+	tx := repo.BeginTransaction()
+	defer func() { _ = tx.Rollback() }()
+	child := tx.BeginTransaction()
+
+	assert.False(t, child.HasPendingWrites(""))
+
+	tx.MarkPending("widgets")
+	assert.True(t, child.HasPendingWrites("widgets"), "a write in the parent is seen by the child")
+	assert.True(t, child.HasPendingWrites(""), "an unknown table may be the written one")
+	assert.False(t, child.HasPendingWrites("gadgets"))
+
+	child.MarkPending("")
+	assert.True(t, tx.HasPendingWrites("gadgets"), "an unknown table written dirties every one")
 }
 
 // TestTxDeferred_InvalidatesOnlyAfterCommit confirms the other half of

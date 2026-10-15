@@ -451,12 +451,13 @@ type Tx struct {
 	commitFns   []func(context.Context) error
 	rollbackFns []func()
 
-	// pending supports the cache plugin's PendingTracker interface: once
-	// any write happens on this Tx, every subsequent read on it must skip
-	// the cache — under TxDeferred, that write's own invalidation is
-	// deferred to commit, so without this a read later in the same
-	// transaction could still be served the value cached before the write.
-	pending bool
+	// pending supports the cache plugin's PendingTracker interface: the
+	// tables written on this Tx, "" for an unknown one. Every later read of
+	// them on it must skip the cache — under TxDeferred, the write's own
+	// invalidation is deferred to commit, so without this a read later in
+	// the same transaction could still be served the value cached before
+	// the write.
+	pending map[string]struct{}
 }
 
 // commitHook mirrors plugin.CommitHook for compile-time verification.
@@ -469,31 +470,37 @@ var _ commitHook = (*Tx)(nil)
 
 // pendingTracker mirrors plugin.PendingTracker for compile-time verification.
 type pendingTracker interface {
-	MarkPending()
-	HasPendingWrites() bool
+	MarkPending(table string)
+	HasPendingWrites(table string) bool
 }
 
 var _ pendingTracker = (*Tx)(nil)
 
-// MarkPending records that a write has happened on this transaction, and
-// on every transaction it is nested in: they all see the write. Called by
-// the cache plugin's write callback.
-func (tx *Tx) MarkPending() {
+// MarkPending records a write to table ("" if unknown) on this
+// transaction, and on every transaction it is nested in: they all see the
+// write. Called by the cache plugin's write callback.
+func (tx *Tx) MarkPending(table string) {
 	for t := tx; t != nil; t = t.parent {
 		t.mutex.Lock()
-		t.pending = true
+		if t.pending == nil {
+			t.pending = make(map[string]struct{})
+		}
+		t.pending[table] = struct{}{}
 		t.mutex.Unlock()
 	}
 }
 
-// HasPendingWrites reports whether MarkPending has been called on this
-// transaction, or on one it is nested in, since it began.
-func (tx *Tx) HasPendingWrites() bool {
+// HasPendingWrites reports whether a read of table ("" for any) on this
+// transaction must skip the cache: since it, or one it is nested in,
+// began, table or an unknown one was written.
+func (tx *Tx) HasPendingWrites(table string) bool {
 	for t := tx; t != nil; t = t.parent {
 		t.mutex.RLock()
-		pending := t.pending
+		_, written := t.pending[table]
+		_, unknown := t.pending[""]
+		dirty := written || unknown || (table == "" && len(t.pending) > 0)
 		t.mutex.RUnlock()
-		if pending {
+		if dirty {
 			return true
 		}
 	}

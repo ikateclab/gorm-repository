@@ -22,9 +22,14 @@ type CommitHook interface {
 // sessions so reads can detect dirty state and bypass the cache
 // regardless of TxMode. The plugin will prefer a DB read over a cache
 // read whenever HasPendingWrites reports true.
+//
+// Writes are tracked per table: a read of a table the transaction hasn't
+// written may still be served from the cache. The empty table stands for
+// an unknown one — marked, it dirties every table; asked about, it is
+// dirty once anything was written.
 type PendingTracker interface {
-	MarkPending()
-	HasPendingWrites() bool
+	MarkPending(table string)
+	HasPendingWrites(table string) bool
 }
 
 // ctxKey is an unexported type used as context.Value keys.

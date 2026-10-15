@@ -324,6 +324,7 @@ func TestCallback_PendingTracker_SkipsCache(t *testing.T) {
 	assert.Equal(t, "alice", u2.Name)
 	// Should not have gotten a cache hit (dirty state bypasses cache).
 	assert.Equal(t, 1, met.misses, "dirty-state query should not count as miss in cache path")
+	assert.Equal(t, []string{"test_users"}, pt.asked, "the tracker is asked about the table read")
 }
 
 // fakeSQLLogger records every Trace call gorm's processor makes — the
@@ -486,7 +487,7 @@ func TestCallback_TaglessWrite_MarksPending(t *testing.T) {
 	pt := &fakePendingTracker{}
 	tx := db.Set(CommitHookKey, CommitHook(&fakeHook{})).Set(PendingTrackerKey, PendingTracker(pt))
 	require.NoError(t, tx.Model(&testUser{ID: 1}).Update("name", "b").Error)
-	assert.True(t, pt.pending)
+	assert.Equal(t, []string{"test_users"}, pt.marked)
 }
 
 // A raw write whose table can't be parsed (here behind a CTE) can't be
@@ -499,7 +500,7 @@ func TestCallback_ExecUnknownTable_MarksPending(t *testing.T) {
 	// Session: each call below gets its own Statement.
 	tx := db.Set(CommitHookKey, CommitHook(&fakeHook{})).Set(PendingTrackerKey, PendingTracker(pt)).Session(&gorm.Session{})
 	require.NoError(t, tx.Exec("WITH x AS (SELECT 1) UPDATE test_users SET name = 'b' WHERE id = 1").Error)
-	assert.True(t, pt.pending)
+	assert.Equal(t, []string{""}, pt.marked, "an unknown table dirties every one")
 	assert.True(t, rec.hasSkip("exec-unknown-table"))
 
 	// A CTE that only reads is neither.
@@ -692,12 +693,23 @@ func setupScriptedDB(t *testing.T, opts ...Option) (*gorm.DB, *scriptedCache, *m
 	return db, sc, mc, rec, met
 }
 
+// fakePendingTracker records the tables it is told and asked about; any
+// write dirties every read.
 type fakePendingTracker struct {
 	pending bool
+	marked  []string
+	asked   []string
 }
 
-func (f *fakePendingTracker) MarkPending()           { f.pending = true }
-func (f *fakePendingTracker) HasPendingWrites() bool { return f.pending }
+func (f *fakePendingTracker) MarkPending(table string) {
+	f.pending = true
+	f.marked = append(f.marked, table)
+}
+
+func (f *fakePendingTracker) HasPendingWrites(table string) bool {
+	f.asked = append(f.asked, table)
+	return f.pending
+}
 
 func extractPlugin(t *testing.T, db *gorm.DB) *Plugin {
 	t.Helper()

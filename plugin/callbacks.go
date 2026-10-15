@@ -102,10 +102,6 @@ func (p *Plugin) skipReason(db *gorm.DB) string {
 			return "tx-bypass"
 		}
 	}
-	// Dirty-state detection.
-	if pt := lookupPendingTracker(db); pt != nil && pt.HasPendingWrites() {
-		return "pending-writes"
-	}
 	// GORM's anonymous many2many join structs (built via reflect.StructOf)
 	// have no stable type name to key or decode against. Never cache
 	// these; a named join type registered via db.SetupJoinTable avoids
@@ -293,6 +289,12 @@ func (p *Plugin) queryReplace(db *gorm.DB) {
 
 	if reason := uncacheableQuery(db, raw); reason != "" {
 		p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: reason, SQL: db.Statement.SQL.String()})
+		runQuery(db)
+		return
+	}
+	// Checked after the build: before it, Statement.Table may not be known.
+	if hasPendingWrites(db) {
+		p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: "pending-writes", SQL: db.Statement.SQL.String()})
 		runQuery(db)
 		return
 	}
@@ -560,8 +562,8 @@ func (p *Plugin) execWriteCallback(db *gorm.DB) {
 	if len(tables) == 0 {
 		if execLooksLikeWriteRe.MatchString(stripLeadingComments(sql)) {
 			p.emit(db.Statement.Context, Event{Kind: EventSkip, Model: modelLabel(db.Statement), Reason: "exec-unknown-table", SQL: sql})
-			// Nothing to invalidate, but the transaction is dirty now.
-			markPending(db)
+			// Nothing to invalidate, but every table is dirty now.
+			markPending(db, "")
 		}
 		return
 	}
@@ -575,11 +577,19 @@ func (p *Plugin) execWriteCallback(db *gorm.DB) {
 	}
 }
 
-// markPending flags the session's transaction as dirty, if it tracks that.
-func markPending(db *gorm.DB) {
+// markPending flags table ("" if unknown) as written in the session's
+// transaction, if it tracks that.
+func markPending(db *gorm.DB, table string) {
 	if pt := lookupPendingTracker(db); pt != nil {
-		pt.MarkPending()
+		pt.MarkPending(unqualifiedTable(table))
 	}
+}
+
+// hasPendingWrites reports whether the session's transaction wrote the
+// table this query reads.
+func hasPendingWrites(db *gorm.DB) bool {
+	pt := lookupPendingTracker(db)
+	return pt != nil && pt.HasPendingWrites(unqualifiedTable(db.Statement.Table))
 }
 
 // invalidateForWrite derives the write's tags and invalidates them: on
@@ -589,7 +599,7 @@ func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
 	// Mark pending writes for dirty-state tracking, before the no-tags
 	// return: a write nothing is tagged for still changed rows a later
 	// read in this transaction must not be served from the cache.
-	markPending(db)
+	markPending(db, db.Statement.Table)
 
 	var tags []string
 	if p.options.tagStrategy != nil {
