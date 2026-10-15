@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -704,4 +706,48 @@ func extractPlugin(t *testing.T, db *gorm.DB) *Plugin {
 	p, ok := raw.(*Plugin)
 	require.True(t, ok)
 	return p
+}
+
+// fromJoinRe is what readsAnotherRelation stands in for.
+var fromJoinRe = regexp.MustCompile(`(?i)\b(FROM|JOIN)\b`)
+
+func readsAnotherRelationRe(sql string) bool {
+	froms := 0
+	for _, m := range fromJoinRe.FindAllString(sql, -1) {
+		if strings.EqualFold(m, "JOIN") {
+			return true
+		}
+		froms++
+	}
+	return froms > 1
+}
+
+var readsAnotherRelationCorpus = []string{
+	``,
+	`SELECT * FROM "users" WHERE id = ? ORDER BY "users"."id" LIMIT 1`,
+	`SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders)`,
+	`SELECT * FROM users u JOIN orders o ON o.user_id = u.id`,
+	`select * from a union select * from b`,
+	`SELECT from_date, joined FROM t WHERE "from" = ?`,
+	`SELECT * FROM t WHERE x = 'FROM'`,
+	`SELECT * FROM_t`, `SELECT * FROMt`, `FROM`, `from`, `JoIn`, `xjoin`, `join_`, `_from from`,
+	"SELECT *\nFROM\tt\nLEFT\tJOIN u", `SELECT * FROM t1,t2`, `SELECT 1 FROM t -- from x`,
+	"SELECT * FROM t WHERE c = 'ä from'", "éfrom fromé from", "FROM FROM", "frſom from",
+}
+
+func TestReadsAnotherRelation_MatchesRegexp(t *testing.T) {
+	for _, sql := range readsAnotherRelationCorpus {
+		assert.Equal(t, readsAnotherRelationRe(sql), readsAnotherRelation(sql), "%q", sql)
+	}
+}
+
+func FuzzReadsAnotherRelation(f *testing.F) {
+	for _, sql := range readsAnotherRelationCorpus {
+		f.Add(sql)
+	}
+	f.Fuzz(func(t *testing.T, sql string) {
+		if got, want := readsAnotherRelation(sql), readsAnotherRelationRe(sql); got != want {
+			t.Fatalf("readsAnotherRelation(%q) = %v, regexp says %v", sql, got, want)
+		}
+	})
 }

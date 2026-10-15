@@ -60,6 +60,44 @@ func TestTagsFromEntity_Nil(t *testing.T) {
 	assert.Nil(t, TagsFromEntity((*taggedUser)(nil)))
 }
 
+type valueTaggedUser struct{ ID string }
+
+func (u valueTaggedUser) CacheTags() []string { return []string{"user:" + u.ID} }
+
+func TestTagsFromEntity_ValueReceiver(t *testing.T) {
+	assert.Equal(t, []string{"user:a", "user:b"}, TagsFromEntity([]valueTaggedUser{{ID: "a"}, {ID: "b"}}))
+	assert.Equal(t, []string{"user:a"}, TagsFromEntity(&[]*valueTaggedUser{{ID: "a"}, nil}))
+}
+
+func TestTagsFromEntity_InterfaceElements(t *testing.T) {
+	in := []interface{}{&taggedUser{ID: "a"}, plainUser{ID: "x"}, nil, valueTaggedUser{ID: "b"}, taggedUser{ID: "c"}}
+	assert.Equal(t, []string{"user:a", "user:b", "user:c"}, TagsFromEntity(in))
+}
+
+func TestTagsFromEntity_NotTaggableBatch(t *testing.T) {
+	assert.Nil(t, TagsFromEntity(&[]plainUser{{ID: "x"}, {ID: "y"}}))
+	assert.Nil(t, TagsFromEntity([][]*plainUser{{{ID: "x"}}}))
+	assert.Nil(t, TagsFromEntity(map[string]*taggedUser{"a": {ID: "a"}}), "maps aren't walked")
+}
+
+// Past the length it scans, tagSet dedupes with a map: same result.
+func TestTagsFromEntity_DedupLongList(t *testing.T) {
+	var in []*taggedUser
+	var want []string
+	for i := 0; i < 3*tagSetScanLimit; i++ {
+		id := string(rune('A' + i))
+		in = append(in, &taggedUser{ID: id}, &taggedUser{ID: id})
+		want = append(want, "user:"+id)
+	}
+	assert.Equal(t, want, TagsFromEntity(in))
+}
+
+type recursiveSlice []recursiveSlice
+
+func TestTagsFromEntity_RecursiveType(t *testing.T) {
+	assert.Nil(t, TagsFromEntity(recursiveSlice{{}, {{}}}))
+}
+
 func TestTagsFromStatement_TableOnly(t *testing.T) {
 	stmt := &gorm.Statement{Table: "users"}
 	tags := TagsFromStatement(stmt, nil)

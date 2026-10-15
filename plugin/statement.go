@@ -5,9 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -33,31 +34,46 @@ func (p *Plugin) cacheKey(stmt *gorm.Statement, schemaVersion string) string {
 	return buildCacheKey(p.options.keyPrefix, schemaVersion, stmt)
 }
 
+// keyBufPool holds the scratch buffers buildCacheKey hashes, so a key
+// costs no allocation beyond the returned string. maxPooledKeyBuf keeps a
+// rare huge query (a long IN list) from pinning its buffer in the pool.
+var keyBufPool = sync.Pool{New: func() interface{} { b := make([]byte, 0, 512); return &b }}
+
+const maxPooledKeyBuf = 64 << 10
+
 // buildCacheKey renders "cache:go:{prefix:}{schemaVersion:}{table}:{hash}".
 func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
 	// prefix and schemaVersion are labelled: the readable part can't tell
 	// WithKeyPrefix("x") from WithSchemaVersion("x"), so the hash must.
-	var b strings.Builder
-	b.WriteString(codecVersion)
-	b.WriteString("|prefix=")
-	b.WriteString(strconv.Quote(prefix))
-	b.WriteString("|schema=")
-	b.WriteString(strconv.Quote(schemaVersion))
-	b.WriteByte('|')
+	bp := keyBufPool.Get().(*[]byte)
+	b := append((*bp)[:0], codecVersion...)
+	b = append(b, "|prefix="...)
+	b = strconv.AppendQuote(b, prefix)
+	b = append(b, "|schema="...)
+	b = strconv.AppendQuote(b, schemaVersion)
+	b = append(b, '|')
 	table := ""
 	if stmt != nil {
 		table = stmt.Table
-		b.WriteString(stmt.Table)
-		b.WriteByte('|')
-		b.WriteString(stmt.SQL.String())
-		b.WriteByte('|')
-		b.WriteString(destSignature(stmt.Dest))
-		b.WriteByte('|')
-		b.WriteString(varsSignature(stmt.Vars))
+		b = append(b, stmt.Table...)
+		b = append(b, '|')
+		b = append(b, stmt.SQL.String()...)
+		b = append(b, '|')
+		b = append(b, destSignature(stmt.Dest)...)
+		b = append(b, '|')
+		b = appendVars(b, stmt.Vars)
 	}
-	sum := sha256.Sum256([]byte(b.String()))
+	sum := sha256.Sum256(b)
+	if cap(b) <= maxPooledKeyBuf {
+		*bp = b
+		keyBufPool.Put(bp)
+	}
 
+	if table == "" {
+		table = "no-table"
+	}
 	var key strings.Builder
+	key.Grow(len(keyPrefix) + len(prefix) + len(schemaVersion) + len(table) + 3 + hex.EncodedLen(len(sum)))
 	key.WriteString(keyPrefix)
 	if prefix != "" {
 		key.WriteString(prefix)
@@ -67,12 +83,11 @@ func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
 		key.WriteString(schemaVersion)
 		key.WriteByte(':')
 	}
-	if table == "" {
-		table = "no-table"
-	}
 	key.WriteString(table)
 	key.WriteByte(':')
-	key.WriteString(hex.EncodeToString(sum[:]))
+	var digest [2 * sha256.Size]byte
+	hex.Encode(digest[:], sum[:])
+	key.Write(digest[:])
 	return key.String()
 }
 
@@ -89,88 +104,113 @@ func destSignature(dest interface{}) string {
 
 // varsSignature renders the bound parameter list deterministically.
 func varsSignature(vars []interface{}) string {
-	if len(vars) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i, v := range vars {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		writeVar(&b, v)
-	}
-	return b.String()
+	return string(appendVars(nil, vars))
 }
 
-// writeVar handles the common scalar types that appear in WHERE clauses.
+// appendVars appends varsSignature's rendering of vars to b.
+func appendVars(b []byte, vars []interface{}) []byte {
+	for i, v := range vars {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = appendVar(b, v)
+	}
+	return b
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+// appendVar handles the common scalar types that appear in WHERE clauses.
 // Non-trivial values (structs, maps) fall through to fmt's %v with a
 // type prefix; that's not ideal long-term but is acceptable while we
 // surface real query shapes through tests.
-func writeVar(b *strings.Builder, v interface{}) {
-	if v == nil {
-		b.WriteString("<nil>")
-		return
+//
+// The rendering is part of every cache key: changing it re-keys the whole
+// cache (TestVarsSignature_Golden pins it).
+func appendVar(b []byte, v interface{}) []byte {
+	// The common types skip reflection; each renders exactly as the
+	// reflect path below would.
+	switch x := v.(type) {
+	case nil:
+		return append(b, "<nil>"...)
+	case string:
+		return strconv.AppendQuote(b, x)
+	case int:
+		return strconv.AppendInt(b, int64(x), 10)
+	case int64:
+		return strconv.AppendInt(b, x, 10)
+	case bool:
+		return strconv.AppendBool(b, x)
+	case time.Time:
+		return appendTime(b, x)
 	}
-	rv := reflect.ValueOf(v)
+	return appendVarValue(b, reflect.ValueOf(v))
+}
+
+func appendVarValue(b []byte, rv reflect.Value) []byte {
 	switch rv.Kind() {
 	case reflect.Ptr, reflect.Interface:
 		if rv.IsNil() {
-			b.WriteString("<nil>")
-			return
+			return append(b, "<nil>"...)
 		}
-		writeVar(b, rv.Elem().Interface())
+		return appendVarValue(b, rv.Elem())
 	case reflect.Slice, reflect.Array:
-		// Bytes fast-path so []byte parameters don't blow up the key.
+		// Bytes are hex-encoded so []byte parameters don't blow up the key.
 		// uuid.UUID and similar fixed-size byte arrays (what FindById's id
 		// argument actually is) land here as reflect.Array, not
-		// reflect.Slice — and since they arrive via an interface{} bound
-		// var, the reflect.Value is never addressable, so rv.Bytes()
-		// panics ("reflect.Value.Bytes of unaddressable byte array").
-		// Copy element-by-element for arrays instead of relying on it.
+		// reflect.Slice — and one bound directly as an interface{} var
+		// isn't addressable, so rv.Bytes() would panic ("reflect.Value.Bytes
+		// of unaddressable byte array"). Such an array is copied out first.
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			b.WriteByte('[')
-			if rv.Kind() == reflect.Slice {
-				b.WriteString(hex.EncodeToString(rv.Bytes()))
+			b = append(b, '[')
+			if rv.Kind() == reflect.Slice || rv.CanAddr() {
+				b = hex.AppendEncode(b, rv.Bytes())
 			} else {
-				buf := make([]byte, rv.Len())
-				for i := 0; i < rv.Len(); i++ {
-					buf[i] = byte(rv.Index(i).Uint())
+				var scratch [64]byte
+				buf := scratch[:0]
+				if rv.Len() > len(scratch) {
+					buf = make([]byte, rv.Len())
+				} else {
+					buf = scratch[:rv.Len()]
 				}
-				b.WriteString(hex.EncodeToString(buf))
+				reflect.Copy(reflect.ValueOf(buf), rv)
+				b = hex.AppendEncode(b, buf)
 			}
-			b.WriteByte(']')
-			return
+			return append(b, ']')
 		}
-		b.WriteByte('[')
+		b = append(b, '[')
 		for i := 0; i < rv.Len(); i++ {
 			if i > 0 {
-				b.WriteByte(',')
+				b = append(b, ',')
 			}
-			writeVar(b, rv.Index(i).Interface())
+			b = appendVarValue(b, rv.Index(i))
 		}
-		b.WriteByte(']')
+		return append(b, ']')
 	case reflect.String:
-		b.WriteString(strconv.Quote(rv.String()))
+		return strconv.AppendQuote(b, rv.String())
 	case reflect.Bool:
-		b.WriteString(strconv.FormatBool(rv.Bool()))
+		return strconv.AppendBool(b, rv.Bool())
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		b.WriteString(strconv.FormatInt(rv.Int(), 10))
+		return strconv.AppendInt(b, rv.Int(), 10)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		b.WriteString(strconv.FormatUint(rv.Uint(), 10))
+		return strconv.AppendUint(b, rv.Uint(), 10)
 	case reflect.Float32, reflect.Float64:
-		b.WriteString(strconv.FormatFloat(rv.Float(), 'g', -1, 64))
+		return strconv.AppendFloat(b, rv.Float(), 'g', -1, 64)
 	default:
 		// Special-case time.Time for stable keys regardless of monotonic
 		// clock or location pointer identity.
-		if t, ok := v.(time.Time); ok {
-			b.WriteString(t.UTC().Format(time.RFC3339Nano))
-			return
+		if rv.Type() == timeType {
+			return appendTime(b, rv.Interface().(time.Time))
 		}
 		// Stable fallback: prefix with the Go type to disambiguate.
-		b.WriteString(reflect.TypeOf(v).String())
-		b.WriteByte('=')
-		b.WriteString(fmt.Sprintf("%v", v))
+		b = append(b, rv.Type().String()...)
+		b = append(b, '=')
+		return fmt.Appendf(b, "%v", rv.Interface())
 	}
+}
+
+func appendTime(b []byte, t time.Time) []byte {
+	return t.UTC().AppendFormat(b, time.RFC3339Nano)
 }
 
 // modelLabel returns a short label suitable for metrics, derived from
@@ -194,21 +234,12 @@ func modelLabel(stmt *gorm.Statement) string {
 	return stmt.Table
 }
 
-// dedupeSorted returns a sorted, de-duplicated copy of in.
+// dedupeSorted sorts in in place and returns it de-duplicated; callers
+// pass a slice they own.
 func dedupeSorted(in []string) []string {
 	if len(in) == 0 {
 		return nil
 	}
-	cp := make([]string, len(in))
-	copy(cp, in)
-	sort.Strings(cp)
-	out := cp[:0]
-	var last string
-	for i, s := range cp {
-		if i == 0 || s != last {
-			out = append(out, s)
-		}
-		last = s
-	}
-	return out
+	slices.Sort(in)
+	return slices.Compact(in)
 }

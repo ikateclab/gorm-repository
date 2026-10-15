@@ -44,14 +44,19 @@ func encode(v interface{}, rowsAffected int64) ([]byte, error) {
 	if rowsAffected < 0 {
 		rowsAffected = 0
 	}
+	// The value is encoded straight after the header, into one buffer.
 	var buf bytes.Buffer
-	buf.WriteByte(payloadValue)
-	buf.Write(binary.AppendUvarint(nil, uint64(rowsAffected)))
-	b, err := msgpack.Marshal(v)
+	var header [1 + binary.MaxVarintLen64]byte
+	header[0] = payloadValue
+	n := binary.PutUvarint(header[1:], uint64(rowsAffected))
+	buf.Write(header[:1+n])
+	enc := msgpack.GetEncoder()
+	enc.Reset(&buf)
+	err := enc.Encode(v)
+	msgpack.PutEncoder(enc)
 	if err != nil {
 		return nil, err
 	}
-	buf.Write(b)
 	return buf.Bytes(), nil
 }
 

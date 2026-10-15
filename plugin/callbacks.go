@@ -125,9 +125,6 @@ func (p *Plugin) skipReason(db *gorm.DB) string {
 	return ""
 }
 
-// multiTableTokenRe matches SQL keywords that pull in another relation.
-var multiTableTokenRe = regexp.MustCompile(`(?i)\b(FROM|JOIN)\b`)
-
 // plainTableExprRe matches a TableExpr naming one table, optionally
 // schema-qualified and quoted, as GORM writes it for Table("users"),
 // Table("public.users") or a schema-qualified TableName. The last
@@ -169,18 +166,47 @@ func uncacheableQuery(db *gorm.DB, raw bool) string {
 	if _, ok := stmt.Clauses["FOR"]; ok {
 		return "locking"
 	}
-	froms, joins := 0, 0
-	for _, m := range multiTableTokenRe.FindAllString(stmt.SQL.String(), -1) {
-		if strings.EqualFold(m, "JOIN") {
-			joins++
-		} else {
-			froms++
-		}
-	}
-	if joins > 0 || froms > 1 {
+	if readsAnotherRelation(stmt.SQL.String()) {
 		return "multi-table"
 	}
 	return ""
+}
+
+// readsAnotherRelation reports whether sql has a JOIN, or more than one
+// FROM, as a whole word in any case — the keywords that pull in another
+// relation. It runs on every cacheable query, so it scans words by hand: a
+// `(?i)\b(FROM|JOIN)\b` regexp, which finds the same ones, was the costliest
+// step of a cache hit.
+func readsAnotherRelation(sql string) bool {
+	froms := 0
+	for i := 0; i < len(sql); {
+		if !isWordByte(sql[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(sql) && isWordByte(sql[j]) {
+			j++
+		}
+		if j-i == 4 {
+			switch w := sql[i:j]; {
+			case strings.EqualFold(w, "join"):
+				return true
+			case strings.EqualFold(w, "from"):
+				if froms++; froms > 1 {
+					return true
+				}
+			}
+		}
+		i = j
+	}
+	return false
+}
+
+// isWordByte reports whether c is an ASCII word character, as regexp's \w
+// and \b define it.
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
 // isAnonymousStructDest reports whether dest is an unnamed struct type
