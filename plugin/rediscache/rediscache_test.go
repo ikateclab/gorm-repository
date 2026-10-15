@@ -1,6 +1,7 @@
 package rediscache
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
+
+	"github.com/ikateclab/gorm-repository/plugin"
 )
 
 // setupRedis starts a real Redis container so these tests exercise the
@@ -332,9 +335,14 @@ func TestGet_CorruptEnvelopeIsAMiss(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
 
+	valid := string(encodeEntry([]string{"*", "Contact:1"}, nil, []byte("value")))
 	for name, raw := range map[string]string{
-		"not json": "{garbage",
-		"no value": `{"versions":{},"tags":["Contact:1"]}`,
+		"garbage":   "{garbage",
+		"empty":     "",
+		"truncated": valid[:len(valid)-len("value")-1],
+		// What earlier versions stored: an entry from before an upgrade is
+		// read again from the database, not misread.
+		"json envelope": `{"versions":{"*":0,"Contact:1":0},"tags":["Contact:1"],"value":"dmFsdWU="}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, client.Set(ctx, "k", raw, time.Minute).Err())
@@ -345,6 +353,32 @@ func TestGet_CorruptEnvelopeIsAMiss(t *testing.T) {
 			assert.Positive(t, versions["Contact:1"], "versions are still returned for the Set")
 		})
 	}
+}
+
+func TestEntry_RoundTrip(t *testing.T) {
+	for _, value := range [][]byte{nil, {}, []byte("value"), bytes.Repeat([]byte{0, '{', 0xff}, 1000)} {
+		raw := encodeEntry([]string{"*", "Contact:1", ""}, plugin.Versions{"*": 3, "Contact:1": 1 << 52}, value)
+		e, ok := decodeEntry(raw)
+		require.True(t, ok)
+		assert.Equal(t, []string{"*", "Contact:1", ""}, e.Tags)
+		assert.Equal(t, map[string]int64{"*": 3, "Contact:1": 1 << 52, "": 0}, e.Versions,
+			"a tag with no version records 0")
+		assert.Equal(t, len(value), len(e.Value))
+		assert.True(t, bytes.Equal(value, e.Value))
+	}
+}
+
+// An entry cut anywhere in its header is rejected, never read as one with
+// fewer tags. (The value runs to the end, so a cut there can't be seen.)
+func TestDecodeEntry_RejectsTruncatedHeader(t *testing.T) {
+	raw := encodeEntry([]string{"*", "Contact:1"}, plugin.Versions{"Contact:1": 300}, []byte("value"))
+	header := len(raw) - len("value")
+	for i := 0; i < header; i++ {
+		_, ok := decodeEntry(raw[:i])
+		assert.False(t, ok, "prefix of %d bytes", i)
+	}
+	_, ok := decodeEntry([]byte{entryFormat, 0xff, 0xff, 0xff, 0xff, 0x0f})
+	assert.False(t, ok, "a tag count larger than the entry")
 }
 
 func TestWithMaxTTL_NonPositiveIgnored(t *testing.T) {

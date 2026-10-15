@@ -14,14 +14,14 @@
 // The "cache:ver:" counters are the part shared with the Node.js backend:
 // both sides must bump them the same way (see bumpScript) for a write from
 // either language to invalidate what the other cached. Data keys and their
-// envelope are private to each side.
+// envelope (see encodeEntry) are private to each side.
 //
 // Requires Redis >= 5 (EVAL calling TIME before a write).
 package rediscache
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"slices"
 	"strconv"
@@ -57,10 +57,71 @@ redis.call('SET', KEYS[1], nxt, 'PX', ARGV[1])
 return nxt
 `
 
+// entry is a stored value with the tag versions its read started at.
 type entry struct {
-	Versions map[string]int64 `json:"versions"`
-	Tags     []string         `json:"tags"`
-	Value    []byte           `json:"value"`
+	Versions map[string]int64
+	Tags     []string
+	Value    []byte
+}
+
+// entryFormat opens every stored entry. A value that doesn't start with it
+// (e.g. the JSON envelope earlier versions stored) reads as a miss.
+const entryFormat byte = 1
+
+// encodeEntry renders an entry as its format byte, the number of tags,
+// each tag (length-prefixed) with its version, then the value as is: no
+// escaping or base64 for Redis to store and the next read to undo.
+func encodeEntry(tags []string, versions plugin.Versions, value []byte) []byte {
+	size := 1 + binary.MaxVarintLen64 + len(value)
+	for _, tag := range tags {
+		size += 2*binary.MaxVarintLen64 + len(tag)
+	}
+	b := make([]byte, 0, size)
+	b = append(b, entryFormat)
+	b = binary.AppendUvarint(b, uint64(len(tags)))
+	for _, tag := range tags {
+		b = binary.AppendUvarint(b, uint64(len(tag)))
+		b = append(b, tag...)
+		// A tag Get wasn't asked about records 0, so any bump at all
+		// makes the entry stale: safe, at worst a miss.
+		b = binary.AppendVarint(b, versions[tag])
+	}
+	return append(b, value...)
+}
+
+// decodeEntry parses what encodeEntry rendered; ok is false for anything
+// else. The value aliases raw.
+func decodeEntry(raw []byte) (e entry, ok bool) {
+	if len(raw) == 0 || raw[0] != entryFormat {
+		return entry{}, false
+	}
+	raw = raw[1:]
+	n, size := binary.Uvarint(raw)
+	// Each tag takes at least two bytes, which bounds n before it sizes
+	// anything.
+	if size <= 0 || n > uint64(len(raw)/2) {
+		return entry{}, false
+	}
+	raw = raw[size:]
+	e.Tags = make([]string, 0, n)
+	e.Versions = make(map[string]int64, n)
+	for i := uint64(0); i < n; i++ {
+		l, size := binary.Uvarint(raw)
+		if size <= 0 || l > uint64(len(raw)-size) {
+			return entry{}, false
+		}
+		tag := string(raw[size : size+int(l)])
+		raw = raw[size+int(l):]
+		v, size := binary.Varint(raw)
+		if size <= 0 {
+			return entry{}, false
+		}
+		raw = raw[size:]
+		e.Tags = append(e.Tags, tag)
+		e.Versions[tag] = v
+	}
+	e.Value = raw
+	return e, true
 }
 
 // Option configures a Cache.
@@ -118,9 +179,12 @@ func (c *Cache) Get(ctx context.Context, key string, tags []string) ([]byte, boo
 		return nil, false, nil, err
 	}
 
-	var e entry
 	raw, err := data.Bytes()
-	if err != nil || json.Unmarshal(raw, &e) != nil || e.Value == nil {
+	if err != nil {
+		return nil, false, versions, nil
+	}
+	e, ok := decodeEntry(raw)
+	if !ok {
 		return nil, false, versions, nil
 	}
 	if bumpedSince(e, versions) {
@@ -157,18 +221,7 @@ func (c *Cache) Set(ctx context.Context, key string, value []byte, tags []string
 	if ttl <= 0 || ttl > c.maxTTL {
 		ttl = c.maxTTL
 	}
-	all := withAllTag(tags)
-	recorded := make(map[string]int64, len(all))
-	for _, tag := range all {
-		// A tag Get wasn't asked about records 0, so any bump at all
-		// makes the entry stale: safe, at worst a miss.
-		recorded[tag] = versions[tag]
-	}
-	raw, err := json.Marshal(entry{Versions: recorded, Tags: tags, Value: value})
-	if err != nil {
-		return err
-	}
-	return c.client.Set(ctx, key, raw, ttl).Err()
+	return c.client.Set(ctx, key, encodeEntry(withAllTag(tags), versions, value), ttl).Err()
 }
 
 // Invalidate bumps every tag's version. Entries aren't deleted: the next
