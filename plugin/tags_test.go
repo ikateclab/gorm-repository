@@ -74,6 +74,18 @@ func TestTagsFromEntity_InterfaceElements(t *testing.T) {
 	assert.Equal(t, []string{"user:a", "user:b", "user:c"}, TagsFromEntity(in))
 }
 
+// A nil pointer inside an interface is skipped, not asked for its tags:
+// taggedUser.CacheTags would dereference it.
+func TestTagsFromEntity_TypedNilInInterface(t *testing.T) {
+	in := []interface{}{(*taggedUser)(nil), &taggedUser{ID: "a"}, CacheTaggable((*taggedUser)(nil))}
+	assert.NotPanics(t, func() {
+		assert.Equal(t, []string{"user:a"}, TagsFromEntity(in))
+	})
+	assert.NotPanics(t, func() {
+		assert.Nil(t, TagsFromEntity([]CacheTaggable{(*taggedUser)(nil)}))
+	})
+}
+
 func TestTagsFromEntity_NotTaggableBatch(t *testing.T) {
 	assert.Nil(t, TagsFromEntity(&[]plainUser{{ID: "x"}, {ID: "y"}}))
 	assert.Nil(t, TagsFromEntity([][]*plainUser{{{ID: "x"}}}))

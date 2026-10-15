@@ -49,7 +49,14 @@ func TagsFromEntity(v interface{}) []string {
 			return
 		}
 		switch rv.Kind() {
-		case reflect.Ptr, reflect.Interface:
+		case reflect.Interface:
+			// Unwrapped before asking: an interface holding a nil pointer
+			// isn't nil itself, and CacheTags on that pointer would panic.
+			if rv.IsNil() {
+				return
+			}
+			walk(rv.Elem())
+		case reflect.Ptr:
 			if rv.IsNil() {
 				return
 			}
@@ -98,10 +105,7 @@ var taggableType = reflect.TypeOf((*CacheTaggable)(nil)).Elem()
 // interface either directly or via its pointer. The type is checked first:
 // boxing a struct to ask would copy it.
 func asTaggable(rv reflect.Value) (CacheTaggable, bool) {
-	if !rv.IsValid() || !rv.CanInterface() {
-		return nil, false
-	}
-	if rv.Kind() != reflect.Interface && !rv.Type().Implements(taggableType) {
+	if !rv.IsValid() || !rv.CanInterface() || !rv.Type().Implements(taggableType) {
 		return nil, false
 	}
 	if t, ok := rv.Interface().(CacheTaggable); ok {

@@ -355,6 +355,22 @@ func TestGet_CorruptEnvelopeIsAMiss(t *testing.T) {
 	}
 }
 
+// An empty value is stored and served like any other, as the memory backend
+// does: an entry is only a miss when it's stale or isn't an entry at all.
+func TestEmptyValueRoundTrips(t *testing.T) {
+	c := New(setupRedis(t))
+	ctx := context.Background()
+	for _, value := range [][]byte{nil, {}} {
+		_, _, versions, err := c.Get(ctx, "k", []string{"Contact:1"})
+		require.NoError(t, err)
+		require.NoError(t, c.Set(ctx, "k", value, []string{"Contact:1"}, time.Minute, versions))
+		data, hit, _, err := c.Get(ctx, "k", []string{"Contact:1"})
+		require.NoError(t, err)
+		assert.True(t, hit)
+		assert.Empty(t, data)
+	}
+}
+
 func TestEntry_RoundTrip(t *testing.T) {
 	for _, value := range [][]byte{nil, {}, []byte("value"), bytes.Repeat([]byte{0, '{', 0xff}, 1000)} {
 		raw := encodeEntry([]string{"*", "Contact:1", ""}, plugin.Versions{"*": 3, "Contact:1": 1 << 52}, value)

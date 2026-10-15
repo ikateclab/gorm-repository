@@ -121,6 +121,7 @@ type sigStruct struct {
 }
 type sigBytes []byte
 type sigByte uint8
+type sigTime time.Time
 
 // TestVarsSignature_Golden pins how each kind of var renders: it is hashed
 // into every cache key, so a change re-keys the whole cache.
@@ -160,6 +161,8 @@ func TestVarsSignature_Golden(t *testing.T) {
 		{"long-byte-array", [65]byte{64: 0xab}, "[" + strings.Repeat("00", 64) + "ab]"},
 		{"time", tm, "2026-01-02T06:04:05.6007008Z"},
 		{"time-ptr", &tm, "2026-01-02T06:04:05.6007008Z"},
+		{"named-time", sigTime(tm), "2026-01-02T06:04:05.6007008Z"},
+		{"named-time-ptr", (*sigTime)(&tm), "2026-01-02T06:04:05.6007008Z"},
 		{"time-slice", []time.Time{tm, tm.Add(time.Hour)}, "[2026-01-02T06:04:05.6007008Z,2026-01-02T07:04:05.6007008Z]"},
 		{"string-ptr", &s, `"str"`},
 		{"int-ptr-ptr", &pn, "42"},

@@ -208,10 +208,12 @@ func appendVarValue(b []byte, rv reflect.Value) []byte {
 	case reflect.Float32, reflect.Float64:
 		return strconv.AppendFloat(b, rv.Float(), 'g', -1, 64)
 	default:
-		// Special-case time.Time for stable keys regardless of monotonic
-		// clock or location pointer identity.
-		if rv.Type() == timeType {
-			return appendTime(b, rv.Interface().(time.Time))
+		// Special-case time.Time, and types defined from it, for stable
+		// keys regardless of monotonic clock or location pointer identity:
+		// %v would print a named time type's *Location address, which
+		// differs between processes.
+		if rv.Type().ConvertibleTo(timeType) {
+			return appendTime(b, rv.Convert(timeType).Interface().(time.Time))
 		}
 		// Stable fallback: prefix with the Go type to disambiguate.
 		b = append(b, rv.Type().String()...)
