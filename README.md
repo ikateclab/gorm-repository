@@ -312,6 +312,7 @@ Plain GORM transactions (`db.Transaction`, `db.Begin`) give the plugin no commit
 - Requires Redis 5 or newer, with server clocks roughly in sync (NTP). Single nodes, Cluster and Ring all work, through any `redis.UniversalClient`.
 - Entries live at most 15 minutes by default, whatever TTL the plugin asks for (including 0, "no expiry"). Change the cap with `rediscache.New(client, rediscache.WithMaxTTL(d))`. It exists because each tag's invalidation counter (`cache:ver:{tag}`) expires shortly after the longest entry could, and an entry outliving its counters could otherwise be served as valid.
 - To share Redis with the Node.js backend, both sides must bump the `cache:ver:{tag}` counters the same way (see `bumpScript` in `plugin/rediscache/rediscache.go`); otherwise writes from one side don't invalidate the other's entries. Each side keeps its own data keys (`cache:go:…` here).
+- Entries are stored in a compact binary envelope. Ones written in the JSON envelope earlier versions used read as misses and are rewritten by the next read, so while a rolling deploy runs both versions, a key the other version wrote last costs a miss.
 
 > **Note:** the Node.js side of the `cache:ver:{tag}` format hasn't been confirmed yet.
 
@@ -322,16 +323,16 @@ Plain GORM transactions (`db.Transaction`, `db.Begin`) give the plugin no commit
 
 ### Overhead
 
-Indicative numbers from `go test -run '^$' -bench . -benchmem ./plugin/ ./plugin/rediscache/`, with Postgres and Redis both in local containers (4 vCPU, 2.1 GHz Xeon):
+Indicative medians from `go test -run '^$' -bench . -benchmem ./plugin/ ./plugin/rediscache/`, with Postgres 16 and Redis 7 both running locally (4 vCPU, 2.1 GHz Xeon):
 
 | Operation | No cache | With cache |
 |---|---|---|
-| Find by id, hit | 302 µs | Redis 194 µs · memory 34 µs |
-| Find by id, miss | 302 µs | Redis 845 µs |
-| Find 100 rows, hit | 832 µs | Redis 369 µs |
-| Update (invalidates) | 1.23 ms | Redis 1.76 ms |
+| Find by id, hit | 122 µs | Redis 73 µs · memory 8 µs |
+| Find by id, miss | 122 µs | Redis 286 µs |
+| Find 100 rows, hit | 494 µs | Redis 184 µs |
+| Update (invalidates) | 691 µs | Redis 927 µs |
 
-Both servers being local, their round trips cost about the same, so a hit saves more against a remote or busy database than shown here. A miss pays a cache lookup and a store on top of the query, and decoding a cached single row takes about 15 µs.
+Both servers being local, their round trips cost about the same, so a hit saves more against a remote or busy database than shown here. A miss pays a cache lookup and a store on top of the query. A hit served from memory costs about 8 µs in all, decoding included.
 
 ## Requirements
 
