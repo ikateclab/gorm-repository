@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Tx.Commit` and `Tx.Rollback` are safe to call concurrently and finish the transaction, running its hooks, exactly once.
 - A failed outermost `Tx.Commit` marks the transaction rolled back and runs its rollback hooks; it still returns the error.
 - The query cache does less work per query: a hit from memory takes about a third less time, building a cache key allocates once instead of 16 times (the keys themselves are unchanged), and a batch write of a model without `CacheTags` is no longer walked row by row.
-- `rediscache` stores entries in a binary envelope instead of JSON with a base64-encoded value: about a quarter less Redis memory per entry, and a 100-row hit about twice as fast. Entries in the old envelope read as misses.
+- `rediscache` stores entries in a binary envelope instead of JSON with a base64-encoded value: about a quarter less Redis memory per entry, and a Redis read of a 100-row result about twice as fast (the whole hit, decoding included, about a third faster). Entries in the old envelope read as misses.
 
 ### Fixed
 - `Tx.BeginTransaction` on a `Tx` used to fail while still sharing the parent's transaction, so committing the child committed the parent.

@@ -150,6 +150,8 @@ func TestVarsSignature_Golden(t *testing.T) {
 		{"bytes-nil", []byte(nil), "[]"},
 		{"named-bytes", sigBytes{9, 8}, "[0908]"},
 		{"named-byte-slice", []sigByte{1, 2}, "[0102]"},
+		{"named-byte-array", [2]sigByte{1, 2}, "[0102]"},
+		{"long-named-byte-array", [65]sigByte{64: 0xab}, "[" + strings.Repeat("00", 64) + "ab]"},
 		{"uuid", id, "[00112233445566778899aabbccddeeff]"},
 		{"uuid-ptr", &id, "[00112233445566778899aabbccddeeff]"},
 		{"uuid-slice", []uuid.UUID{id, id2}, "[[00112233445566778899aabbccddeeff],[ffeeddccbbaa99887766554433221100]]"},

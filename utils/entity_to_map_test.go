@@ -146,7 +146,7 @@ func TestEntityToMap_SmallFieldCount(t *testing.T) {
 		Age:  30,
 	}
 
-	// Test with exactly smallFieldCount (4) fields
+	// Test with exactly four fields
 	fields := map[string]interface{}{
 		"Id":   nil,
 		"Name": nil,

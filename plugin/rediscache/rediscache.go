@@ -97,14 +97,15 @@ func decodeEntry(raw []byte) (e entry, ok bool) {
 	}
 	raw = raw[1:]
 	n, size := binary.Uvarint(raw)
-	// Each tag takes at least two bytes, which bounds n before it sizes
-	// anything.
+	// Each tag takes at least two bytes. A corrupt count past that is
+	// rejected, and one within it still only sizes a few tags up front.
 	if size <= 0 || n > uint64(len(raw)/2) {
 		return entry{}, false
 	}
 	raw = raw[size:]
-	e.Tags = make([]string, 0, n)
-	e.Versions = make(map[string]int64, n)
+	hint := int(min(n, 16))
+	e.Tags = make([]string, 0, hint)
+	e.Versions = make(map[string]int64, hint)
 	for i := uint64(0); i < n; i++ {
 		l, size := binary.Uvarint(raw)
 		if size <= 0 || l > uint64(len(raw)-size) {

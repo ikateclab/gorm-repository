@@ -118,7 +118,10 @@ func appendVars(b []byte, vars []interface{}) []byte {
 	return b
 }
 
-var timeType = reflect.TypeOf(time.Time{})
+var (
+	timeType = reflect.TypeOf(time.Time{})
+	byteType = reflect.TypeOf(byte(0))
+)
 
 // appendVar handles the common scalar types that appear in WHERE clauses.
 // Non-trivial values (structs, maps) fall through to fmt's %v with a
@@ -173,7 +176,15 @@ func appendVarValue(b []byte, rv reflect.Value) []byte {
 				} else {
 					buf = scratch[:rv.Len()]
 				}
-				reflect.Copy(reflect.ValueOf(buf), rv)
+				if rv.Type().Elem() == byteType {
+					reflect.Copy(reflect.ValueOf(buf), rv)
+				} else {
+					// reflect.Copy panics unless the element types match
+					// exactly: a named uint8 is copied one by one.
+					for i := range buf {
+						buf[i] = byte(rv.Index(i).Uint())
+					}
+				}
 				b = hex.AppendEncode(b, buf)
 			}
 			return append(b, ']')
