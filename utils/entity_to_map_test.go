@@ -3,6 +3,8 @@ package utils
 import (
 	"reflect"
 	"testing"
+
+	"gorm.io/gorm/clause"
 )
 
 // Test entity for entity_to_map tests
@@ -276,5 +278,40 @@ func TestHandleNestedFields_UnsupportedType(t *testing.T) {
 	expectedError := "unsupported type for nested fields"
 	if err.Error() != expectedError {
 		t.Errorf("Expected error '%s', got '%s'", expectedError, err.Error())
+	}
+}
+
+type jsonModeA struct {
+	Mode string `json:"mode"`
+}
+
+type jsonModeB struct {
+	Mode string `json:"state"`
+}
+
+type jsonNamesEntity struct {
+	First  jsonModeA
+	Second jsonModeB
+}
+
+// Two nested types with a same-named field each keep their own JSON tag,
+// whichever the process converted first.
+func TestEntityToMap_NestedJSONNamesPerType(t *testing.T) {
+	entity := jsonNamesEntity{First: jsonModeA{Mode: "a"}, Second: jsonModeB{Mode: "b"}}
+	for _, c := range []struct{ field, column, want string }{
+		{"First", "first", `{"mode":"a"}`},
+		{"Second", "second", `{"state":"b"}`},
+	} {
+		result, err := EntityToMap(map[string]interface{}{c.field: map[string]interface{}{"Mode": nil}}, &entity)
+		if err != nil {
+			t.Fatalf("EntityToMap(%s): %v", c.field, err)
+		}
+		expr, ok := result[c.column].(clause.Expr)
+		if !ok || len(expr.Vars) != 2 {
+			t.Fatalf("%s: expected a merge expression, got %#v", c.field, result[c.column])
+		}
+		if got := expr.Vars[1]; got != c.want {
+			t.Errorf("%s: merged %v, want %s", c.field, got, c.want)
+		}
 	}
 }
