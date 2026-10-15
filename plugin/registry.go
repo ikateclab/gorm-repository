@@ -9,7 +9,8 @@ import (
 
 // RegisterModel returns an Option that registers per-model overrides at
 // plugin construction time. The table name is inferred from T's Tabler
-// implementation or from GORM's default naming strategy.
+// implementation or GORM's default naming strategy, then re-resolved with
+// the DB's own NamingStrategy when the plugin is installed (db.Use).
 //
 // Usage:
 //
@@ -28,6 +29,10 @@ func RegisterModel[T any](mopts ...ModelOption) Option {
 			o.modelRegistrations = make(map[string]*ModelOptions)
 		}
 		o.modelRegistrations[table] = &mo
+		if o.modelTypes == nil {
+			o.modelTypes = make(map[reflect.Type]string)
+		}
+		o.modelTypes[modelType[T]()] = table
 	}
 }
 
@@ -52,22 +57,24 @@ func ModelWithExtraTags(tags ...string) ModelOption {
 
 // tableNameFor infers the table name for T. If T implements Tabler
 // (TableName() string) it uses that; otherwise it falls back to GORM's
-// default naming strategy (snake_case plural).
+// default naming strategy (snake_case plural). RegisterModel[*User] names
+// the same table as RegisterModel[User].
 func tableNameFor[T any]() string {
-	var t T
-	// Check if T itself (value receiver) implements Tabler.
-	if tabler, ok := any(t).(interface{ TableName() string }); ok {
+	rt := modelType[T]()
+	// A pointer's method set covers both value and pointer receivers, and
+	// a fresh one is never nil, so a value-receiver TableName can't panic.
+	if tabler, ok := reflect.New(rt).Interface().(interface{ TableName() string }); ok {
 		return tabler.TableName()
-	}
-	// Check pointer receiver.
-	if tabler, ok := any(&t).(interface{ TableName() string }); ok {
-		return tabler.TableName()
-	}
-	// Fallback: use GORM's naming strategy.
-	rt := reflect.TypeOf(t)
-	for rt.Kind() == reflect.Ptr {
-		rt = rt.Elem()
 	}
 	ns := schema.NamingStrategy{}
 	return ns.TableName(rt.Name())
+}
+
+// modelType returns T with any pointers stripped.
+func modelType[T any]() reflect.Type {
+	rt := reflect.TypeOf((*T)(nil)).Elem()
+	for rt.Kind() == reflect.Ptr {
+		rt = rt.Elem()
+	}
+	return rt
 }

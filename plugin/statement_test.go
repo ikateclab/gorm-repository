@@ -7,7 +7,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
+	"github.com/ikateclab/gorm-repository/plugin/memory"
 )
 
 func makeStmt(table, sql string, vars []interface{}, dest interface{}) *gorm.Statement {
@@ -72,6 +76,16 @@ func TestCacheKey_ReadablePrefix(t *testing.T) {
 func TestCacheKey_NoTableFallback(t *testing.T) {
 	k := CacheKey(nil, "v1")
 	assert.True(t, strings.HasPrefix(k, keyPrefix+"v1:no-table:"))
+}
+
+func TestCacheKey_KeyPrefix(t *testing.T) {
+	s := makeStmt("users", "S", nil, nil)
+	a := New(nil, WithKeyPrefix("svc-a")).cacheKey(s, "v1")
+	b := New(nil, WithKeyPrefix("svc-b")).cacheKey(s, "v1")
+
+	assert.True(t, strings.HasPrefix(a, keyPrefix+"svc-a:v1:users:"))
+	assert.NotEqual(t, a, b, "services sharing a cache must not share keys")
+	assert.Equal(t, CacheKey(s, "v1"), New(nil).cacheKey(s, "v1"), "no prefix keeps the plain layout")
 }
 
 func TestVarsSignature_Types(t *testing.T) {
@@ -152,4 +166,65 @@ func TestDedupeSorted(t *testing.T) {
 	out := dedupeSorted([]string{"b", "a", "b", "c", "a"})
 	assert.Equal(t, []string{"a", "b", "c"}, out)
 	assert.Nil(t, dedupeSorted(nil))
+}
+
+// WithKeyPrefix("x") and WithSchemaVersion("x") render the same readable
+// key; the hash used to be identical too.
+func TestCacheKey_PrefixAndSchemaVersionDontCollide(t *testing.T) {
+	s := makeStmt("users", "S", nil, nil)
+	prefixed := New(nil, WithKeyPrefix("x")).cacheKey(s, "")
+	versioned := New(nil).cacheKey(s, "x")
+
+	assert.True(t, strings.HasPrefix(prefixed, keyPrefix+"x:users:"))
+	assert.True(t, strings.HasPrefix(versioned, keyPrefix+"x:users:"), "the readable part is unchanged")
+	assert.NotEqual(t, prefixed, versioned)
+
+	// Nor can one field's value spill into the other's.
+	assert.NotEqual(t, buildCacheKey("a|schema=b", "", s), buildCacheKey("a", "b", s))
+}
+
+// A per-call SchemaVersionSetting keys and tags the read like a plugin-wide
+// WithSchemaVersion would, without touching other calls.
+func TestCacheKey_PerCallSchemaVersion(t *testing.T) {
+	db, _, _, rec, met := setupScriptedDB(t, WithSchemaVersion("v1"))
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+
+	var a, b, c testUser
+	require.NoError(t, db.First(&a, 1).Error)
+	assert.True(t, strings.HasPrefix(rec.last(EventMiss).Key, keyPrefix+"v1:test_users:"))
+	require.NoError(t, db.Set(SchemaVersionSetting, "v2").First(&b, 1).Error)
+	assert.True(t, strings.HasPrefix(rec.last(EventMiss).Key, keyPrefix+"v2:test_users:"))
+	require.NoError(t, db.Set(SchemaVersionSetting, "v2").First(&c, 1).Error)
+	assert.Equal(t, 2, met.misses)
+	assert.Equal(t, 1, met.hits)
+}
+
+// Two services sharing one backend under different WithKeyPrefix values
+// never read each other's entries, but share invalidation: tags aren't
+// prefixed.
+func TestCacheKey_PrefixesShareOneBackend(t *testing.T) {
+	mc := memory.New()
+	open := func(prefix string) (*gorm.DB, *testMetrics) {
+		met := &testMetrics{}
+		db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+		require.NoError(t, err)
+		require.NoError(t, db.Use(New(mc, WithKeyPrefix(prefix), WithMetrics(met))))
+		require.NoError(t, db.AutoMigrate(&testUser{}))
+		require.NoError(t, db.Create(&testUser{ID: 1, Name: prefix}).Error)
+		return db, met
+	}
+	dbA, metA := open("svc-a")
+	dbB, metB := open("svc-b")
+
+	var a, b testUser
+	require.NoError(t, dbA.First(&a, 1).Error)
+	require.NoError(t, dbB.First(&b, 1).Error)
+	assert.Equal(t, "svc-a", a.Name)
+	assert.Equal(t, "svc-b", b.Name)
+	assert.Equal(t, 1, metA.misses)
+	assert.Equal(t, 1, metB.misses, "svc-b must not be served svc-a's entry")
+	assert.Equal(t, 2, mc.Len())
+
+	require.NoError(t, dbA.Model(&testUser{ID: 1}).Update("name", "svc-a2").Error)
+	assert.Equal(t, 0, mc.Len(), "a write through one prefix invalidates both")
 }

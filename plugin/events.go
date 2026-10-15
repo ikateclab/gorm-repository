@@ -48,8 +48,8 @@ func (p *Plugin) emit(ctx context.Context, e Event) {
 	}
 }
 
-func (p *Plugin) set(ctx context.Context, key, model string, data []byte, tags []string, ttl time.Duration, seq int64) error {
-	if err := p.cache.Set(ctx, key, data, tags, ttl, seq); err != nil {
+func (p *Plugin) set(ctx context.Context, key, model string, data []byte, tags []string, ttl time.Duration, versions Versions) error {
+	if err := p.cache.Set(ctx, key, data, tags, ttl, versions); err != nil {
 		p.emit(ctx, Event{Kind: EventError, Model: model, Key: key, Reason: "set", Err: err})
 		return err
 	}

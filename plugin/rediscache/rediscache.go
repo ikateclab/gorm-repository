@@ -1,11 +1,22 @@
-// Package rediscache implements plugin.Cache on Redis, with the same layout
-// as the Node.js backend's TagCache (services/redis/TagCache.ts) — matching
-// the layout, not just the tag names, is what lets a write from either
-// language invalidate what the other cached.
+// Package rediscache implements plugin.Cache on Redis.
 //
-// Every invalidation takes the next "cache:seq" and records it on each tag
-// ("cache:inv:{tag}"); an entry keeps the seq its read started at, and is
-// served only while none of its tags was invalidated after that.
+// Every tag has its own version counter ("cache:ver:{tag}"); invalidating
+// a tag bumps it. An entry records the versions of its tags as of the
+// moment its read started, and is served only while none of them has been
+// bumped since. Versions are per tag, so no single key is touched by every
+// read and invalidation (which would pin all cache traffic to one shard).
+//
+// A counter expires markerTTL after its last bump. When it's recreated it
+// must still exceed every version an entry recorded earlier, so a bump
+// sets it to max(current+1, the Redis server's clock in µs) — monotonic
+// across expiry as long as server clocks are roughly in sync.
+//
+// The "cache:ver:" counters are the part shared with the Node.js backend:
+// both sides must bump them the same way (see bumpScript) for a write from
+// either language to invalidate what the other cached. Data keys and their
+// envelope are private to each side.
+//
+// Requires Redis >= 5 (EVAL calling TIME before a write).
 package rediscache
 
 import (
@@ -13,35 +24,65 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"time"
 
-	"github.com/ikateclab/gorm-repository/plugin"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/ikateclab/gorm-repository/plugin"
 )
 
 const (
-	seqKey    = "cache:seq"
-	invPrefix = "cache:inv:"
-	invMember = "seq"
+	verPrefix = "cache:ver:"
 	// allTag is on every entry: invalidating it drops the whole cache.
 	allTag = "*"
-	// invTTL must outlive every entry that can depend on an invalidation:
-	// Set caps entries at maxTTL, and is expected within invTTL-maxTTL of
-	// its Get.
-	invTTL = 15 * time.Minute
-	maxTTL = 13 * time.Minute
+	// DefaultMaxTTL is the default cap on how long an entry lives; raise or
+	// lower it with WithMaxTTL.
+	DefaultMaxTTL = 15 * time.Minute
+	// markerSlack is how much longer than the longest entry a version
+	// counter outlives its last bump. It must exceed the time between a
+	// read's Get and its Set (the plugin drops Sets older than a minute).
+	markerSlack = 2 * time.Minute
 )
 
+// bumpScript advances one tag's version: max(current+1, server time in
+// µs), stored with a PX expiry of ARGV[1]. It touches only KEYS[1], so it
+// is Redis Cluster safe. Lua numbers are doubles, exact for µs timestamps.
+const bumpScript = `
+local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local nxt = string.format('%.0f', math.max(cur + 1, now))
+redis.call('SET', KEYS[1], nxt, 'PX', ARGV[1])
+return nxt
+`
+
 type entry struct {
-	Seq   int64           `json:"seq"`
-	Tags  []string        `json:"tags"`
-	Value json.RawMessage `json:"value"`
+	Versions map[string]int64 `json:"versions"`
+	Tags     []string         `json:"tags"`
+	Value    []byte           `json:"value"`
 }
 
-// Cache is a Redis-backed implementation of plugin.Cache, wire-compatible
-// with the Node.js TagCache.
+// Option configures a Cache.
+type Option func(*Cache)
+
+// WithMaxTTL sets how long an entry may live, replacing the 15-minute
+// DefaultMaxTTL. Every entry is clamped to it, a requested TTL of 0 ("no
+// expiry") included: version counters only outlive the longest entry by
+// markerSlack, and an entry outliving its tags' counters could be served
+// as valid after they expire. A longer cap keeps counters around longer.
+func WithMaxTTL(d time.Duration) Option {
+	return func(c *Cache) {
+		if d > 0 {
+			c.maxTTL = d
+		}
+	}
+}
+
+// Cache is a Redis-backed implementation of plugin.Cache.
 type Cache struct {
 	client redis.UniversalClient
+	maxTTL time.Duration
 }
 
 var _ plugin.Cache = (*Cache)(nil)
@@ -49,28 +90,43 @@ var _ plugin.Cache = (*Cache)(nil)
 // New wraps an existing Redis client. Any redis.UniversalClient works
 // (*redis.Client, *redis.ClusterClient, *redis.Ring), so callers can point
 // this at the same Redis deployment the Node backend already talks to.
-func New(client redis.UniversalClient) *Cache {
-	return &Cache{client: client}
+func New(client redis.UniversalClient, opts ...Option) *Cache {
+	c := &Cache{client: client, maxTTL: DefaultMaxTTL}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
-// Get checks tags in the same round-trip as the lookup; any other tag the
-// entry carries costs a second one.
-func (c *Cache) Get(ctx context.Context, key string, tags []string) ([]byte, bool, int64, error) {
-	known := append([]string{allTag}, tags...)
+func (c *Cache) markerTTL() time.Duration { return c.maxTTL + markerSlack }
+
+// Get returns key's value if none of its tags was invalidated since it was
+// read, plus the current versions of tags (for a Set after a miss). The
+// read's own tags are checked in the same round-trip as the lookup; any
+// other tag the entry carries costs a second one.
+func (c *Cache) Get(ctx context.Context, key string, tags []string) ([]byte, bool, plugin.Versions, error) {
+	known := withAllTag(tags)
 	pipe := c.client.Pipeline()
 	data := pipe.Get(ctx, key)
-	seqCmd := pipe.Get(ctx, seqKey)
-	invs := invalidations(ctx, pipe, known)
+	verCmds := versionCmds(ctx, pipe, known)
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return nil, false, 0, err
+		return nil, false, nil, err
 	}
-	seq, _ := seqCmd.Int64()
+	versions, err := readVersions(known, verCmds)
+	if err != nil {
+		// Without a reliable snapshot nothing can be served or stored.
+		return nil, false, nil, err
+	}
 
 	var e entry
 	raw, err := data.Bytes()
-	if err != nil || json.Unmarshal(raw, &e) != nil || e.Value == nil || invalidatedAfter(invs, e.Seq) {
-		return nil, false, seq, nil
+	if err != nil || json.Unmarshal(raw, &e) != nil || e.Value == nil {
+		return nil, false, versions, nil
 	}
+	if bumpedSince(e, versions) {
+		return nil, false, versions, nil
+	}
+
 	var extra []string
 	for _, tag := range e.Tags {
 		if !slices.Contains(known, tag) {
@@ -79,67 +135,98 @@ func (c *Cache) Get(ctx context.Context, key string, tags []string) ([]byte, boo
 	}
 	if len(extra) > 0 {
 		pipe := c.client.Pipeline()
-		invs := invalidations(ctx, pipe, extra)
+		cmds := versionCmds(ctx, pipe, extra)
 		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return nil, false, 0, err
+			return nil, false, nil, err
 		}
-		if invalidatedAfter(invs, e.Seq) {
-			return nil, false, seq, nil
+		current, err := readVersions(extra, cmds)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		if bumpedSince(e, current) {
+			return nil, false, versions, nil
 		}
 	}
-	return e.Value, true, seq, nil
+	return e.Value, true, versions, nil
 }
 
-// Set stores value with its tags and the seq its read started at. The ttl
-// is capped at maxTTL (0 included): an entry that outlived the marker of an
-// invalidation would be served as valid again.
-func (c *Cache) Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration, seq int64) error {
-	if ttl <= 0 || ttl > maxTTL {
-		ttl = maxTTL
+// Set stores value with its tags and the versions its read started at. The
+// ttl is clamped to the max TTL (0 included): an entry that outlived its
+// tags' version counters could be served as valid again.
+func (c *Cache) Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration, versions plugin.Versions) error {
+	if ttl <= 0 || ttl > c.maxTTL {
+		ttl = c.maxTTL
 	}
-	raw, err := json.Marshal(entry{Seq: seq, Tags: tags, Value: value})
+	all := withAllTag(tags)
+	recorded := make(map[string]int64, len(all))
+	for _, tag := range all {
+		// A tag Get wasn't asked about records 0, so any bump at all
+		// makes the entry stale: safe, at worst a miss.
+		recorded[tag] = versions[tag]
+	}
+	raw, err := json.Marshal(entry{Versions: recorded, Tags: tags, Value: value})
 	if err != nil {
 		return err
 	}
 	return c.client.Set(ctx, key, raw, ttl).Err()
 }
 
-// Invalidate records the next seq on every tag. Entries aren't deleted:
-// the next read of each finds it stale.
+// Invalidate bumps every tag's version. Entries aren't deleted: the next
+// read of each finds it stale.
 func (c *Cache) Invalidate(ctx context.Context, tags []string) error {
 	if len(tags) == 0 {
 		return nil
 	}
-	seq, err := c.client.Incr(ctx, seqKey).Result()
-	if err != nil {
-		return err
-	}
+	ttlMs := strconv.FormatInt(c.markerTTL().Milliseconds(), 10)
 	pipe := c.client.Pipeline()
 	for _, tag := range tags {
-		// GT keeps the newest seq when invalidations land out of order.
-		pipe.ZAddGT(ctx, invPrefix+tag, redis.Z{Score: float64(seq), Member: invMember})
-		pipe.Expire(ctx, invPrefix+tag, invTTL)
+		pipe.Eval(ctx, bumpScript, []string{verPrefix + tag}, ttlMs)
 	}
-	_, err = pipe.Exec(ctx)
+	_, err := pipe.Exec(ctx)
 	return err
 }
 
-func invalidations(ctx context.Context, pipe redis.Pipeliner, tags []string) []*redis.FloatCmd {
-	cmds := make([]*redis.FloatCmd, len(tags))
+func withAllTag(tags []string) []string {
+	out := []string{allTag}
+	for _, t := range tags {
+		if !slices.Contains(out, t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func versionCmds(ctx context.Context, pipe redis.Pipeliner, tags []string) []*redis.StringCmd {
+	cmds := make([]*redis.StringCmd, len(tags))
 	for i, tag := range tags {
-		cmds[i] = pipe.ZScore(ctx, invPrefix+tag, invMember)
+		cmds[i] = pipe.Get(ctx, verPrefix+tag)
 	}
 	return cmds
 }
 
-// invalidatedAfter also counts a marker it couldn't read (e.g. one shard
-// down) as an invalidation: better a miss than a stale hit.
-func invalidatedAfter(cmds []*redis.FloatCmd, seq int64) bool {
-	for _, cmd := range cmds {
-		if err := cmd.Err(); err != nil && !errors.Is(err, redis.Nil) {
-			return true
+// readVersions maps tags to their current versions; a missing counter is
+// 0. A counter it couldn't read (e.g. one shard down) is an error: better a
+// miss than a stale hit.
+func readVersions(tags []string, cmds []*redis.StringCmd) (plugin.Versions, error) {
+	out := make(plugin.Versions, len(tags))
+	for i, cmd := range cmds {
+		v, err := cmd.Int64()
+		if errors.Is(err, redis.Nil) {
+			continue
 		}
-		if cmd.Val() > float64(seq) {
+		if err != nil {
+			return nil, err
+		}
+		out[tags[i]] = v
+	}
+	return out, nil
+}
+
+// bumpedSince reports whether any tag in current moved past the version e
+// recorded for it.
+func bumpedSince(e entry, current plugin.Versions) bool {
+	for tag, v := range current {
+		if v > e.Versions[tag] {
 			return true
 		}
 	}

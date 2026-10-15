@@ -78,3 +78,23 @@ func TestWithTagStrategy_NilMeansBuiltinDerivation(t *testing.T) {
 	require.NoError(t, mc.Invalidate(t.Context(), []string{"table:test_users"}))
 	assert.Equal(t, 0, mc.Len())
 }
+
+// A read the strategy gives no tags could never be invalidated, so it runs
+// past the cache without a lookup.
+func TestWithTagStrategy_NoReadTags_SkipsCache(t *testing.T) {
+	strategy := &recordingStrategy{writeTags: []string{"custom:write"}}
+	rec := &testRecorder{}
+	db, sc, mc, _, met := setupScriptedDB(t, WithTagStrategy(strategy), WithEventRecorder(rec))
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+
+	for i := 0; i < 2; i++ {
+		var u testUser
+		require.NoError(t, db.First(&u, 1).Error)
+		assert.Equal(t, "alice", u.Name)
+	}
+	assert.True(t, rec.hasSkip("no-tags"))
+	assert.NotEmpty(t, rec.last(EventSkip).Key)
+	assert.Zero(t, sc.gets)
+	assert.Zero(t, mc.Len())
+	assert.Zero(t, met.misses)
+}

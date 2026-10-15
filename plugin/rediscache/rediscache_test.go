@@ -3,10 +3,12 @@ package rediscache
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	redisContainer "github.com/testcontainers/testcontainers-go/modules/redis"
 )
@@ -15,7 +17,7 @@ import (
 // actual wire protocol, not an in-process fake — the whole point of this
 // package is compatibility with what the Node.js backend does over the same
 // Redis connection.
-func setupRedis(t *testing.T) *redis.Client {
+func setupRedis(t testing.TB) *redis.Client {
 	t.Helper()
 	ctx := context.Background()
 
@@ -41,10 +43,10 @@ func TestRoundTrip_SetThenGet(t *testing.T) {
 	c := New(setupRedis(t))
 	ctx := context.Background()
 
-	_, hit, seq, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	_, hit, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
 	require.False(t, hit)
-	require.NoError(t, c.Set(ctx, "k1", []byte(`{"name":"alice"}`), []string{"Contact:1"}, time.Minute, seq))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`{"name":"alice"}`), []string{"Contact:1"}, time.Minute, versions))
 
 	data, hit, _, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
@@ -52,11 +54,24 @@ func TestRoundTrip_SetThenGet(t *testing.T) {
 	require.JSONEq(t, `{"name":"alice"}`, string(data))
 }
 
+// Values are opaque bytes (the plugin stores gob), not JSON.
+func TestRoundTrip_BinaryValue(t *testing.T) {
+	c := New(setupRedis(t))
+	ctx := context.Background()
+	value := []byte{'g', 0x00, 0xff, 0x10, '"'}
+
+	require.NoError(t, c.Set(ctx, "k1", value, []string{"Contact:1"}, time.Minute, nil))
+	data, hit, _, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Equal(t, value, data)
+}
+
 func TestInvalidate_OnlyTheTaggedEntry(t *testing.T) {
 	c := New(setupRedis(t))
 	ctx := context.Background()
-	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1", "Contact:acc-1:list"}, time.Minute, 0))
-	require.NoError(t, c.Set(ctx, "k2", []byte(`2`), []string{"Contact:2"}, time.Minute, 0))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1", "Contact:acc-1:list"}, time.Minute, nil))
+	require.NoError(t, c.Set(ctx, "k2", []byte(`2`), []string{"Contact:2"}, time.Minute, nil))
 
 	require.NoError(t, c.Invalidate(ctx, []string{"Contact:acc-1:list"}))
 
@@ -72,10 +87,10 @@ func TestSet_ReadOverlappingAWriteIsNeverServed(t *testing.T) {
 	c := New(setupRedis(t))
 	ctx := context.Background()
 
-	_, _, seq, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	_, _, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
 	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
-	require.NoError(t, c.Set(ctx, "k1", []byte(`"read before the write"`), []string{"Contact:1"}, time.Minute, seq))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`"read before the write"`), []string{"Contact:1"}, time.Minute, versions))
 
 	_, hit, _, _ := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.False(t, hit)
@@ -86,7 +101,7 @@ func TestSet_ReadOverlappingAWriteIsNeverServed(t *testing.T) {
 func TestGet_ChecksTagsItWasNotGiven(t *testing.T) {
 	c := New(setupRedis(t))
 	ctx := context.Background()
-	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:acc-1:list"}, time.Minute, 0))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:acc-1:list"}, time.Minute, nil))
 
 	_, hit, _, _ := c.Get(ctx, "k1", nil)
 	require.True(t, hit)
@@ -98,7 +113,7 @@ func TestGet_ChecksTagsItWasNotGiven(t *testing.T) {
 func TestInvalidate_AllTagDropsEverything(t *testing.T) {
 	c := New(setupRedis(t))
 	ctx := context.Background()
-	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1"}, time.Minute, 0))
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1"}, time.Minute, nil))
 
 	require.NoError(t, c.Invalidate(ctx, []string{"*"}))
 
@@ -106,69 +121,248 @@ func TestInvalidate_AllTagDropsEverything(t *testing.T) {
 	require.False(t, hit)
 }
 
-func TestInvalidate_OutOfOrderKeepsTheNewest(t *testing.T) {
+// A version counter that expired and is bumped again must still exceed
+// every version recorded before it expired, or older entries would look
+// valid again.
+func TestBump_MonotonicAcrossCounterExpiry(t *testing.T) {
 	client := setupRedis(t)
 	c := New(client)
 	ctx := context.Background()
-	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
-	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
 
-	// An older invalidation of the same tag landing last.
-	require.NoError(t, client.ZAddGT(ctx, invPrefix+"Contact:1", redis.Z{Score: 1, Member: invMember}).Err())
-
-	score, err := client.ZScore(ctx, invPrefix+"Contact:1", invMember).Result()
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	_, _, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
 	require.NoError(t, err)
-	require.Equal(t, float64(2), score)
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1"}, time.Minute, versions))
+
+	require.NoError(t, client.Del(ctx, verPrefix+"Contact:1").Err()) // the counter expires
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+
+	_, hit, _, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	require.NoError(t, err)
+	require.False(t, hit, "a bump after the counter expired must still invalidate older entries")
 }
 
-func TestWireLayout_MatchesNodeBackend(t *testing.T) {
+func TestWireLayout_PerTagVersionCounters(t *testing.T) {
 	client := setupRedis(t)
 	c := New(client)
 	ctx := context.Background()
 
-	require.NoError(t, c.Set(ctx, "mykey", []byte(`"hello"`), []string{"Contact:1"}, time.Minute, 7))
-	raw, err := client.Get(ctx, "mykey").Result()
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	v1, err := client.Get(ctx, "cache:ver:Contact:1").Int64()
 	require.NoError(t, err)
-	require.JSONEq(t, `{"seq":7,"tags":["Contact:1"],"value":"hello"}`, raw)
+	require.Greater(t, v1, int64(0))
+	ttl, err := client.TTL(ctx, "cache:ver:Contact:1").Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, DefaultMaxTTL)
+	require.LessOrEqual(t, ttl, DefaultMaxTTL+markerSlack)
 
 	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
-	seq, err := client.Get(ctx, "cache:seq").Int64()
+	v2, err := client.Get(ctx, "cache:ver:Contact:1").Int64()
 	require.NoError(t, err)
-	score, err := client.ZScore(ctx, "cache:inv:Contact:1", "seq").Result()
-	require.NoError(t, err)
-	require.Equal(t, float64(seq), score)
-	ttl, err := client.TTL(ctx, "cache:inv:Contact:1").Result()
-	require.NoError(t, err)
-	require.Greater(t, ttl, time.Duration(0))
+	require.Greater(t, v2, v1)
+
+	require.Zero(t, client.Exists(ctx, "cache:seq").Val(), "no global counter")
+	require.Zero(t, client.Exists(ctx, "cache:ver:Contact:2").Val(), "untouched tags get no counter")
 }
 
 func TestInvalidate_EmptyTagsIsNoop(t *testing.T) {
 	client := setupRedis(t)
 	require.NoError(t, New(client).Invalidate(context.Background(), nil))
-	require.Zero(t, client.Exists(context.Background(), "cache:seq").Val())
+	keys, err := client.Keys(context.Background(), "*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys)
 }
 
-func TestSet_CapsTTLBelowTheMarkerLifetime(t *testing.T) {
+func TestSet_CapsTTLAtMaxTTL(t *testing.T) {
 	client := setupRedis(t)
-	c := New(client)
 	ctx := context.Background()
 
-	for _, ttl := range []time.Duration{0, time.Hour} {
-		require.NoError(t, c.Set(ctx, "k", []byte(`1`), []string{"Contact:1"}, ttl, 0))
-		got, err := client.TTL(ctx, "k").Result()
-		require.NoError(t, err)
-		require.Greater(t, got, time.Duration(0))
-		require.LessOrEqual(t, got, maxTTL)
+	for _, tc := range []struct {
+		cache *Cache
+		max   time.Duration
+	}{
+		{New(client), DefaultMaxTTL},
+		{New(client, WithMaxTTL(30*time.Minute)), 30 * time.Minute},
+	} {
+		for _, ttl := range []time.Duration{0, time.Hour} {
+			require.NoError(t, tc.cache.Set(ctx, "k", []byte(`1`), []string{"Contact:1"}, ttl, nil))
+			got, err := client.TTL(ctx, "k").Result()
+			require.NoError(t, err)
+			require.Greater(t, got, tc.max-time.Minute)
+			require.LessOrEqual(t, got, tc.max)
+		}
 	}
 }
 
-func TestInvalidatedAfter_UnreadableMarkerCountsAsInvalidated(t *testing.T) {
-	ok := redis.NewFloatCmd(context.Background())
-	failed := redis.NewFloatCmd(context.Background())
-	failed.SetErr(errors.New("shard down"))
-	missing := redis.NewFloatCmd(context.Background())
-	missing.SetErr(redis.Nil)
+func TestWithMaxTTL_StretchesCounterLifetime(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client, WithMaxTTL(time.Hour))
+	ctx := context.Background()
 
-	require.False(t, invalidatedAfter([]*redis.FloatCmd{ok, missing}, 1))
-	require.True(t, invalidatedAfter([]*redis.FloatCmd{ok, failed}, 1))
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+	ttl, err := client.TTL(ctx, "cache:ver:Contact:1").Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, time.Hour, "counters must outlive the longest entry")
+}
+
+func TestReadVersions_UnreadableCounterIsAnError(t *testing.T) {
+	ok := redis.NewStringCmd(context.Background())
+	ok.SetVal("5")
+	missing := redis.NewStringCmd(context.Background())
+	missing.SetErr(redis.Nil)
+	failed := redis.NewStringCmd(context.Background())
+	failed.SetErr(errors.New("shard down"))
+
+	v, err := readVersions([]string{"a", "b"}, []*redis.StringCmd{ok, missing})
+	require.NoError(t, err)
+	require.Equal(t, int64(5), v["a"])
+	require.Zero(t, v["b"])
+
+	_, err = readVersions([]string{"a", "c"}, []*redis.StringCmd{ok, failed})
+	require.Error(t, err)
+}
+
+// pipelineHook counts the pipelines a client sends, and fails the one
+// numbered failOn (1-based; 0 never fails).
+type pipelineHook struct {
+	mu     sync.Mutex
+	count  int
+	failOn int
+}
+
+var errInjected = errors.New("injected pipeline failure")
+
+func (h *pipelineHook) DialHook(next redis.DialHook) redis.DialHook          { return next }
+func (h *pipelineHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook { return next }
+
+func (h *pipelineHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		h.mu.Lock()
+		h.count++
+		fail := h.failOn != 0 && h.count == h.failOn
+		h.mu.Unlock()
+		if fail {
+			for _, cmd := range cmds {
+				cmd.SetErr(errInjected)
+			}
+			return errInjected
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func (h *pipelineHook) pipelines() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.count
+}
+
+// failNext makes the n-th pipeline from now fail.
+func (h *pipelineHook) failNext(n int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.failOn = h.count + n
+}
+
+// A read's own tags are checked in the lookup's round trip; tags only the
+// entry carries cost exactly one more.
+func TestGet_PipelineRoundTrips(t *testing.T) {
+	client := setupRedis(t)
+	hook := &pipelineHook{}
+	client.AddHook(hook)
+	c := New(client)
+	ctx := context.Background()
+
+	_, hit, versions, err := c.Get(ctx, "k1", []string{"Contact:1"})
+	require.NoError(t, err)
+	require.False(t, hit)
+	assert.Equal(t, 1, hook.pipelines(), "a miss is one round trip")
+
+	require.NoError(t, c.Set(ctx, "k1", []byte(`1`), []string{"Contact:1"}, time.Minute, versions))
+	before := hook.pipelines()
+	_, hit, _, err = c.Get(ctx, "k1", []string{"Contact:1"})
+	require.NoError(t, err)
+	require.True(t, hit)
+	assert.Equal(t, before+1, hook.pipelines(), "a hit on the read's own tags is one round trip")
+
+	require.NoError(t, c.Set(ctx, "k2", []byte(`2`), []string{"Contact:1", "Contact:acc-1:list"}, time.Minute, nil))
+	before = hook.pipelines()
+	_, hit, _, err = c.Get(ctx, "k2", []string{"Contact:1"})
+	require.NoError(t, err)
+	require.True(t, hit)
+	assert.Equal(t, before+2, hook.pipelines(), "an extra entry tag costs a second round trip")
+}
+
+// Without a reliable snapshot nothing can be served or stored: a failed
+// round trip, or a counter that can't be read, is an error.
+func TestGet_RoundTripErrors(t *testing.T) {
+	client := setupRedis(t)
+	hook := &pipelineHook{}
+	client.AddHook(hook)
+	c := New(client)
+	ctx := context.Background()
+	require.NoError(t, c.Set(ctx, "k", []byte(`1`), []string{"Contact:1", "Contact:acc-1:list"}, time.Minute, nil))
+
+	hook.failNext(1)
+	_, hit, versions, err := c.Get(ctx, "k", []string{"Contact:1"})
+	assert.ErrorIs(t, err, errInjected, "first round trip")
+	assert.False(t, hit)
+	assert.Nil(t, versions)
+
+	hook.failNext(2)
+	_, hit, versions, err = c.Get(ctx, "k", []string{"Contact:1"})
+	assert.ErrorIs(t, err, errInjected, "second round trip, for the entry's extra tag")
+	assert.False(t, hit)
+	assert.Nil(t, versions)
+
+	// A counter holding garbage fails the round trip that reads it.
+	require.NoError(t, client.Set(ctx, verPrefix+"Contact:acc-1:list", "not-a-number", 0).Err())
+	_, hit, _, err = c.Get(ctx, "k", []string{"Contact:1"})
+	assert.Error(t, err, "second round trip")
+	assert.False(t, hit)
+	_, _, _, err = c.Get(ctx, "k", []string{"Contact:acc-1:list"})
+	assert.Error(t, err, "first round trip")
+}
+
+// An entry that isn't a valid envelope is a miss, not an error: the read
+// goes to the database and overwrites it.
+func TestGet_CorruptEnvelopeIsAMiss(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client)
+	ctx := context.Background()
+	require.NoError(t, c.Invalidate(ctx, []string{"Contact:1"}))
+
+	for name, raw := range map[string]string{
+		"not json": "{garbage",
+		"no value": `{"versions":{},"tags":["Contact:1"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, client.Set(ctx, "k", raw, time.Minute).Err())
+			data, hit, versions, err := c.Get(ctx, "k", []string{"Contact:1"})
+			require.NoError(t, err)
+			assert.False(t, hit)
+			assert.Nil(t, data)
+			assert.Positive(t, versions["Contact:1"], "versions are still returned for the Set")
+		})
+	}
+}
+
+func TestWithMaxTTL_NonPositiveIgnored(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Minute} {
+		assert.Equal(t, DefaultMaxTTL, New(nil, WithMaxTTL(d)).maxTTL)
+	}
+}
+
+// A Redis that can't be reached fails every call rather than pretending.
+func TestUnreachableRedis_Errors(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1, DialTimeout: 200 * time.Millisecond})
+	t.Cleanup(func() { _ = client.Close() })
+	c := New(client)
+	ctx := context.Background()
+
+	_, hit, _, err := c.Get(ctx, "k", []string{"Contact:1"})
+	assert.Error(t, err)
+	assert.False(t, hit)
+	assert.Error(t, c.Set(ctx, "k", []byte(`1`), []string{"Contact:1"}, time.Minute, nil))
+	assert.Error(t, c.Invalidate(ctx, []string{"Contact:1"}))
 }

@@ -7,6 +7,7 @@ package memory
 import (
 	"container/list"
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -16,14 +17,18 @@ import (
 type Cache struct {
 	mu    sync.Mutex
 	max   int
-	items map[string]*list.Element        // key -> element holding *entry
-	order *list.List                      // LRU order; front = most recently used
-	tags  map[string]map[string]struct{}  // tag -> set of keys
+	items map[string]*list.Element       // key -> element holding *entry
+	order *list.List                     // LRU order; front = most recently used
+	tags  map[string]map[string]struct{} // tag -> set of keys
 	now   func() time.Time
 	// seq counts invalidations; inv holds each tag's last one, so a Set
-	// whose read started before it is refused.
-	seq int64
-	inv map[string]int64
+	// whose read started before it is refused. inv is pruned once it holds
+	// maxInv tags; floor is the newest invalidation pruned, so a Set whose
+	// read started before it is refused too (its tag may have been one).
+	seq    int64
+	inv    map[string]int64
+	maxInv int
+	floor  int64
 }
 
 type entry struct {
@@ -41,18 +46,25 @@ type Option func(*Cache)
 // beware).
 func WithMaxEntries(n int) Option { return func(c *Cache) { c.max = n } }
 
+// WithMaxTrackedTags bounds how many invalidated tags are remembered
+// (default 10000). Past it, the oldest half is forgotten; reads that
+// started before them won't be cached, which costs a miss, never a stale
+// hit.
+func WithMaxTrackedTags(n int) Option { return func(c *Cache) { c.maxInv = n } }
+
 // WithClock injects a clock for deterministic tests.
 func WithClock(fn func() time.Time) Option { return func(c *Cache) { c.now = fn } }
 
 // New constructs a new Cache. The default capacity is 1000 entries.
 func New(opts ...Option) *Cache {
 	c := &Cache{
-		max:   1000,
-		items: make(map[string]*list.Element),
-		order: list.New(),
-		tags:  make(map[string]map[string]struct{}),
-		now:   time.Now,
-		inv:   make(map[string]int64),
+		max:    1000,
+		items:  make(map[string]*list.Element),
+		order:  list.New(),
+		tags:   make(map[string]map[string]struct{}),
+		now:    time.Now,
+		inv:    make(map[string]int64),
+		maxInv: 10000,
 	}
 	for _, o := range opts {
 		o(c)
@@ -62,32 +74,40 @@ func New(opts ...Option) *Cache {
 
 // Get returns the cached bytes for key if present and unexpired. The
 // returned slice is a copy and is safe to mutate.
-func (c *Cache) Get(_ context.Context, key string, _ []string) ([]byte, bool, int64, error) {
+func (c *Cache) Get(_ context.Context, key string, tags []string) ([]byte, bool, map[string]int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	versions := make(map[string]int64, len(tags))
+	for _, t := range tags {
+		versions[t] = c.seq
+	}
 	el, ok := c.items[key]
 	if !ok {
-		return nil, false, c.seq, nil
+		return nil, false, versions, nil
 	}
 	e := el.Value.(*entry)
 	if !e.expires.IsZero() && c.now().After(e.expires) {
 		c.removeLocked(el)
-		return nil, false, c.seq, nil
+		return nil, false, versions, nil
 	}
 	c.order.MoveToFront(el)
 	out := make([]byte, len(e.value))
 	copy(out, e.value)
-	return out, true, c.seq, nil
+	return out, true, versions, nil
 }
 
 // Set stores value under key, links it to the given tags, and applies
 // an optional TTL (zero means no expiry) — unless a tag was invalidated
-// after seq.
-func (c *Cache) Set(_ context.Context, key string, value []byte, tags []string, ttl time.Duration, seq int64) error {
+// after versions.
+func (c *Cache) Set(_ context.Context, key string, value []byte, tags []string, ttl time.Duration, versions map[string]int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, t := range tags {
-		if c.inv[t] > seq {
+		v := versions[t]
+		if last, ok := c.inv[t]; ok && last > v {
+			return nil
+		}
+		if v < c.floor {
 			return nil
 		}
 	}
@@ -123,8 +143,23 @@ func (c *Cache) Invalidate(_ context.Context, tags []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seq++
+	track := true
+	if c.maxInv > 0 && len(c.inv)+len(tags) > c.maxInv {
+		if len(tags) > c.maxInv {
+			// More tags than can be tracked at all: forget every tracked
+			// invalidation and refuse any read that started before this
+			// one instead. Costs misses, never a stale store.
+			clear(c.inv)
+			c.floor = c.seq
+			track = false
+		} else {
+			c.pruneInvLocked()
+		}
+	}
 	for _, t := range tags {
-		c.inv[t] = c.seq
+		if track {
+			c.inv[t] = c.seq
+		}
 		keys := c.tags[t]
 		for k := range keys {
 			if el, ok := c.items[k]; ok {
@@ -177,5 +212,27 @@ func (c *Cache) evictIfNeededLocked() {
 			return
 		}
 		c.removeLocked(el)
+	}
+}
+
+// pruneInvLocked forgets the oldest half of the tracked invalidations and
+// raises floor to the newest one forgotten.
+func (c *Cache) pruneInvLocked() {
+	if len(c.inv) == 0 {
+		return
+	}
+	seqs := make([]int64, 0, len(c.inv))
+	for _, s := range c.inv {
+		seqs = append(seqs, s)
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	cut := seqs[len(seqs)/2]
+	for t, s := range c.inv {
+		if s <= cut {
+			delete(c.inv, t)
+		}
+	}
+	if cut > c.floor {
+		c.floor = cut
 	}
 }

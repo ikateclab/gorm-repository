@@ -9,36 +9,49 @@ package plugin
 
 import (
 	"context"
+	"reflect"
 	"time"
 )
+
+// Versions is a backend's snapshot of how far each of a read's tags had
+// been invalidated when the read started (tag -> version; a missing tag
+// counts as 0). Get returns it and Set receives it back unchanged.
+type Versions = map[string]int64
 
 // Cache is the only thing storage backends must implement.
 //
 // Implementations must be safe for concurrent use. Get receives the tags
-// the entry is known to depend on before the query runs, and returns seq:
-// the moment the read started. Set stores under that seq, and a backend
-// never serves a value whose tags were invalidated after it — otherwise a
-// read overlapping a write could cache the pre-write value after the
-// write's invalidation, and serve it until TTL.
+// the entry is known to depend on before the query runs, and returns their
+// Versions at that moment. Set stores under those versions, and a backend
+// never serves a value one of whose tags was invalidated after them —
+// otherwise a read overlapping a write could cache the pre-write value
+// after the write's invalidation, and serve it until TTL. Versions are
+// tracked per tag, not by one global counter, so no single key is touched
+// by every read and invalidation.
 type Cache interface {
-	Get(ctx context.Context, key string, tags []string) (value []byte, hit bool, seq int64, err error)
-	Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration, seq int64) error
+	Get(ctx context.Context, key string, tags []string) (value []byte, hit bool, versions Versions, err error)
+	Set(ctx context.Context, key string, value []byte, tags []string, ttl time.Duration, versions Versions) error
 	Invalidate(ctx context.Context, tags []string) error
 }
 
 // TxMode controls how the plugin behaves inside an open GORM transaction.
-// See the design doc (section 4) for the decision matrix.
+//
+// In every mode, a write inside a transaction that exposes a CommitHook
+// (the repository's Tx does) invalidates on commit, never before it. A
+// plain GORM transaction (db.Begin, db.Transaction) has no hook: reads
+// inside it always skip the cache, and its writes invalidate inline.
 type TxMode int
 
 const (
-	// TxBypass skips the cache entirely inside any transaction. Default.
+	// TxBypass skips the cache for reads inside any transaction. Default.
 	TxBypass TxMode = iota
-	// TxDeferred reads from the cache inside a tx; Set and Invalidate are
-	// queued and applied on commit.
+	// TxDeferred serves reads inside a tx from the cache until the tx
+	// writes (see PendingTracker). Results read inside the tx are never
+	// stored, since another transaction may commit a newer value first.
 	TxDeferred
-	// TxFull reads and writes the cache inline inside a tx; only
-	// invalidations are deferred to commit. Unsafe under rollback — see
-	// the design doc before enabling.
+	// TxFull is TxDeferred, but also stores results read inside the tx
+	// inline. Unsafe: a snapshot read early in a long transaction can be
+	// cached after another transaction already invalidated it.
 	TxFull
 )
 
@@ -49,15 +62,21 @@ type options struct {
 	defaultTTL     time.Duration
 	defaultTTLFunc func() time.Duration
 	defaultTxMode  TxMode
-	schemaVersion string
-	debug         bool
-	scopeColumns  []string
-	metrics       Metrics
+	schemaVersion  string
+	keyPrefix      string
+	debug          bool
+	scopeColumns   []string
+	metrics        Metrics
 
 	// modelRegistrations holds per-model overrides specified via
 	// RegisterModel[T]() at construction time. They are transferred
 	// to the Plugin's registry in New().
 	modelRegistrations map[string]*ModelOptions
+
+	// modelTypes maps each RegisterModel[T] type to the table name it was
+	// registered under with GORM's default naming; Initialize re-resolves
+	// it with the DB's own NamingStrategy.
+	modelTypes map[reflect.Type]string
 
 	// tagStrategy, when set via WithTagStrategy, replaces the plugin's
 	// built-in tag derivation entirely. See tag_strategy.go.
@@ -67,7 +86,8 @@ type options struct {
 }
 
 // WithDefaultTTL sets the default TTL for cached entries. Zero means no
-// expiry.
+// expiry. A backend may clamp it: rediscache caps entries at 15 minutes
+// by default (zero included), which rediscache.WithMaxTTL changes.
 func WithDefaultTTL(ttl time.Duration) Option {
 	return func(o *options) { o.defaultTTL = ttl }
 }
@@ -92,6 +112,13 @@ func WithDefaultTxMode(mode TxMode) Option {
 // version.
 func WithSchemaVersion(v string) Option {
 	return func(o *options) { o.schemaVersion = v }
+}
+
+// WithKeyPrefix namespaces this plugin's cache keys, e.g. per service or
+// database, so two deployments sharing one cache backend can't collide on
+// same-named tables. Tags are not prefixed: invalidation stays shared.
+func WithKeyPrefix(prefix string) Option {
+	return func(o *options) { o.keyPrefix = prefix }
 }
 
 // WithDebug enables verbose logging of cache decisions. Intended for

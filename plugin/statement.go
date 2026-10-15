@@ -22,14 +22,28 @@ const keyPrefix = "cache:go:"
 
 // CacheKey derives a deterministic cache key from a GORM statement, in the
 // form "cache:go:{schemaVersion:}{table}:{hash}" — schemaVersion and table
-// kept readable for inspection, the hash (SQL + vars + dest type)
+// kept readable for inspection, the hash (codec + SQL + vars + dest type)
 // covering everything that actually varies between queries on that table.
 func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
+	return buildCacheKey("", schemaVersion, stmt)
+}
+
+// cacheKey is CacheKey plus the plugin's WithKeyPrefix namespace.
+func (p *Plugin) cacheKey(stmt *gorm.Statement, schemaVersion string) string {
+	return buildCacheKey(p.options.keyPrefix, schemaVersion, stmt)
+}
+
+// buildCacheKey renders "cache:go:{prefix:}{schemaVersion:}{table}:{hash}".
+func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
+	// prefix and schemaVersion are labelled: the readable part can't tell
+	// WithKeyPrefix("x") from WithSchemaVersion("x"), so the hash must.
 	var b strings.Builder
-	if schemaVersion != "" {
-		b.WriteString(schemaVersion)
-		b.WriteByte('|')
-	}
+	b.WriteString(codecVersion)
+	b.WriteString("|prefix=")
+	b.WriteString(strconv.Quote(prefix))
+	b.WriteString("|schema=")
+	b.WriteString(strconv.Quote(schemaVersion))
+	b.WriteByte('|')
 	table := ""
 	if stmt != nil {
 		table = stmt.Table
@@ -45,6 +59,10 @@ func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
 
 	var key strings.Builder
 	key.WriteString(keyPrefix)
+	if prefix != "" {
+		key.WriteString(prefix)
+		key.WriteByte(':')
+	}
 	if schemaVersion != "" {
 		key.WriteString(schemaVersion)
 		key.WriteByte(':')

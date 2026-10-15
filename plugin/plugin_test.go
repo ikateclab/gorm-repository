@@ -6,6 +6,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+
+	"github.com/ikateclab/gorm-repository/plugin/memory"
 )
 
 func TestNew_Defaults(t *testing.T) {
@@ -61,4 +66,60 @@ func TestNoopMetrics(t *testing.T) {
 	m.Miss("user")
 	m.Invalidation("user", "create")
 	m.PostCommitError()
+}
+
+type unparseableRel struct {
+	ID    uint
+	Other struct{ X int } `gorm:"foreignKey:Nope"`
+}
+
+// Initialize fails, rather than silently never applying a registration,
+// when a RegisterModel type can't be parsed, or when one of its callbacks
+// can't be registered.
+func TestPlugin_Initialize_Errors(t *testing.T) {
+	t.Run("unsupported model type", func(t *testing.T) {
+		err := newTestDB(t).Use(New(memory.New(), RegisterModel[int]()))
+		assert.ErrorContains(t, err, "resolve table for int")
+	})
+	t.Run("invalid relation", func(t *testing.T) {
+		err := newTestDB(t).Use(New(memory.New(), RegisterModel[unparseableRel]()))
+		assert.ErrorContains(t, err, "resolve table for plugin.unparseableRel")
+	})
+
+	// A callback whose before/after constraints contradict each other
+	// breaks every later registration on its chain.
+	chains := map[string]func(*gorm.DB) error{
+		"query": func(db *gorm.DB) error {
+			return db.Callback().Query().Before("gorm:query").After("gorm:preload").Register("test:conflict", func(*gorm.DB) {})
+		},
+		"create": func(db *gorm.DB) error {
+			return db.Callback().Create().Before("gorm:begin_transaction").After("gorm:create").Register("test:conflict", func(*gorm.DB) {})
+		},
+		"update": func(db *gorm.DB) error {
+			return db.Callback().Update().Before("gorm:begin_transaction").After("gorm:update").Register("test:conflict", func(*gorm.DB) {})
+		},
+		"delete": func(db *gorm.DB) error {
+			return db.Callback().Delete().Before("gorm:begin_transaction").After("gorm:delete").Register("test:conflict", func(*gorm.DB) {})
+		},
+		"raw": func(db *gorm.DB) error {
+			if err := db.Callback().Raw().Register("test:first", func(*gorm.DB) {}); err != nil {
+				return err
+			}
+			return db.Callback().Raw().Before("gorm:raw").After("test:first").Register("test:conflict", func(*gorm.DB) {})
+		},
+		"row": func(db *gorm.DB) error {
+			if err := db.Callback().Row().Register("test:first", func(*gorm.DB) {}); err != nil {
+				return err
+			}
+			return db.Callback().Row().Before("gorm:row").After("test:first").Register("test:conflict", func(*gorm.DB) {})
+		},
+	}
+	for name, breakChain := range chains {
+		t.Run("callback conflict on "+name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+			require.NoError(t, err)
+			require.Error(t, breakChain(db), "the chain must be broken before the plugin installs")
+			assert.ErrorContains(t, db.Use(New(memory.New())), "conflicting callback")
+		})
+	}
 }

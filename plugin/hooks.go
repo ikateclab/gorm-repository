@@ -4,9 +4,8 @@ import "context"
 
 // CommitHook lets the plugin defer work to a transaction boundary without
 // importing or depending on any particular Tx implementation. The
-// repository's Tx will implement this interface in a later phase; for now
-// the type is defined here so tests and third-party consumers can provide
-// their own adapters.
+// repository's Tx implements it; other transaction wrappers can too, and
+// expose it via db.Set(CommitHookKey, ...) or CommitHookContext.
 type CommitHook interface {
 	// OnCommit registers fn to run when the surrounding transaction
 	// commits successfully. Registered functions run in registration
