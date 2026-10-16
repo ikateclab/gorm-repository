@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -225,11 +228,12 @@ func TestReadVersions_UnreadableCounterIsAnError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// pipelineHook counts the pipelines a client sends, and fails the one
-// numbered failOn (1-based; 0 never fails).
+// pipelineHook counts the pipelines a client sends and their sizes, and
+// fails the one numbered failOn (1-based; 0 never fails).
 type pipelineHook struct {
 	mu     sync.Mutex
 	count  int
+	sizes  []int
 	failOn int
 }
 
@@ -242,6 +246,7 @@ func (h *pipelineHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis
 	return func(ctx context.Context, cmds []redis.Cmder) error {
 		h.mu.Lock()
 		h.count++
+		h.sizes = append(h.sizes, len(cmds))
 		fail := h.failOn != 0 && h.count == h.failOn
 		h.mu.Unlock()
 		if fail {
@@ -258,6 +263,13 @@ func (h *pipelineHook) pipelines() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.count
+}
+
+// sent returns the size of every pipeline sent so far, in order.
+func (h *pipelineHook) sent() []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.sizes)
 }
 
 // failNext makes the n-th pipeline from now fail.
@@ -325,6 +337,197 @@ func TestGet_RoundTripErrors(t *testing.T) {
 	assert.False(t, hit)
 	_, _, _, err = c.Get(ctx, "k", []string{"Contact:acc-1:list"})
 	assert.Error(t, err, "first round trip")
+}
+
+// manyTags returns n distinct tags.
+func manyTags(n int) []string {
+	tags := make([]string, n)
+	for i := range tags {
+		tags[i] = "Contact:" + strconv.Itoa(i)
+	}
+	return tags
+}
+
+// readCounters reads every tag's version counter through client; a missing
+// one is left out.
+func readCounters(t *testing.T, client redis.UniversalClient, tags []string) plugin.Versions {
+	t.Helper()
+	ctx := context.Background()
+	pipe := client.Pipeline()
+	cmds := versionCmds(ctx, pipe, tags)
+	if _, err := pipe.Exec(ctx); !errors.Is(err, redis.Nil) {
+		require.NoError(t, err)
+	}
+	versions, err := readVersions(tags, cmds)
+	require.NoError(t, err)
+	return versions
+}
+
+// notBumped lists the tags whose counter didn't move past before.
+func notBumped(tags []string, before, after plugin.Versions) []string {
+	var out []string
+	for _, tag := range tags {
+		if after[tag] <= before[tag] {
+			out = append(out, tag)
+		}
+	}
+	return out
+}
+
+// commandCalls returns how many times Redis ran each command since its
+// stats were reset, from INFO commandstats ("evalsha", "script|load").
+func commandCalls(t *testing.T, client *redis.Client) map[string]int {
+	t.Helper()
+	info, err := client.Info(context.Background(), "commandstats").Result()
+	require.NoError(t, err)
+	calls := map[string]int{}
+	for _, line := range strings.Split(info, "\r\n") {
+		rest, ok := strings.CutPrefix(line, "cmdstat_")
+		if !ok {
+			continue
+		}
+		name, stats, _ := strings.Cut(rest, ":")
+		field, _, _ := strings.Cut(stats, ",")
+		n, err := strconv.Atoi(strings.TrimPrefix(field, "calls="))
+		require.NoError(t, err, line)
+		calls[name] = n
+	}
+	return calls
+}
+
+// A write tagging thousands of rows bumps them bumpBatch per pipeline, one
+// pipeline after another.
+func TestInvalidate_BumpsInBatches(t *testing.T) {
+	client := setupRedis(t)
+	hook := &pipelineHook{}
+	client.AddHook(hook)
+	c := New(client)
+	tags := manyTags(2500)
+
+	require.NoError(t, c.Invalidate(context.Background(), tags))
+	assert.Equal(t, []int{1000, 1000, 500}, hook.sent())
+	assert.Empty(t, notBumped(tags, nil, readCounters(t, client, tags)))
+}
+
+// The Node backend runs the same script, so the same SHA: changing a byte
+// of bumpScript changes it, and breaks the Node side's comparison test.
+const bumpScriptSHA = "f982d82a0f288340d86ee49f266a63e2e1c074dc"
+
+// The script is loaded once, then sent by its SHA: Redis gets EVALSHA for
+// every tag, never the script's text again.
+func TestInvalidate_RunsTheScriptBySHA(t *testing.T) {
+	client := setupRedis(t)
+	c := New(client)
+	ctx := context.Background()
+	require.Equal(t, bumpScriptSHA, c.bump.Hash(), "bumpScript must stay byte-identical to the Node backend's")
+	require.NoError(t, client.ConfigResetStat(ctx).Err())
+
+	require.NoError(t, c.Invalidate(ctx, manyTags(2500)))
+	require.NoError(t, c.Invalidate(ctx, manyTags(10)))
+
+	calls := commandCalls(t, client)
+	assert.Equal(t, 1, calls["script|load"])
+	assert.Equal(t, 2510, calls["evalsha"])
+	assert.Zero(t, calls["eval"])
+}
+
+// A Redis that lost the script (SCRIPT FLUSH, a restart, a failover)
+// answers NOSCRIPT: it's loaded again and the batch resent.
+func TestInvalidate_RecoversFromNoScript(t *testing.T) {
+	client := setupRedis(t)
+	hook := &pipelineHook{}
+	client.AddHook(hook)
+	c := New(client)
+	ctx := context.Background()
+	tags := manyTags(2500)
+
+	require.NoError(t, c.Invalidate(ctx, tags))
+	before := readCounters(t, client, tags)
+	require.NoError(t, client.ScriptFlush(ctx).Err())
+
+	sent := len(hook.sent())
+	require.NoError(t, c.Invalidate(ctx, tags))
+	assert.Equal(t, []int{1000, 1000, 1000, 500}, hook.sent()[sent:], "the first batch is sent again")
+	assert.Empty(t, notBumped(tags, before, readCounters(t, client, tags)))
+	assert.Equal(t, []bool{true}, client.ScriptExists(ctx, bumpScriptSHA).Val())
+}
+
+// A failed batch fails the call, and the batches after it aren't sent: the
+// caller resends every tag, and bumping one again is harmless.
+func TestInvalidate_FailedBatchFailsTheCall(t *testing.T) {
+	client := setupRedis(t)
+	hook := &pipelineHook{}
+	client.AddHook(hook)
+	c := New(client)
+	ctx := context.Background()
+	tags := manyTags(2500)
+
+	hook.failNext(2)
+	assert.ErrorIs(t, c.Invalidate(ctx, tags), errInjected)
+	assert.Equal(t, []int{1000, 1000}, hook.sent(), "the third batch isn't sent")
+	versions := readCounters(t, client, tags)
+	assert.Empty(t, notBumped(tags[:1000], nil, versions), "the first batch went through")
+	assert.Len(t, versions, 1000, "nothing after it did")
+
+	// A bump failing on the server fails its batch too, and isn't taken
+	// for a missing script.
+	require.NoError(t, client.Set(ctx, verPrefix+tags[1500], "not-a-number", 0).Err())
+	sent := len(hook.sent())
+	err := c.Invalidate(ctx, tags)
+	assert.Error(t, err)
+	assert.False(t, redis.HasErrorPrefix(err, "NOSCRIPT"))
+	assert.Equal(t, []int{1000, 1000}, hook.sent()[sent:], "the failed batch isn't resent, the next isn't sent")
+}
+
+// Ring and Cluster clients spread the counters over several servers: the
+// script must be on each, and one that lost it recovers like a single
+// Redis. Two standalone servers stand in for the shards, the Cluster
+// client getting a fixed slot map.
+func TestInvalidate_ShardedClients(t *testing.T) {
+	servers := []*redis.Client{setupRedis(t), setupRedis(t)}
+	addrA, addrB := servers[0].Options().Addr, servers[1].Options().Addr
+	ctx := context.Background()
+	tags := manyTags(2500)
+
+	for name, newClient := range map[string]func() redis.UniversalClient{
+		"ring": func() redis.UniversalClient {
+			return redis.NewRing(&redis.RingOptions{Addrs: map[string]string{"a": addrA, "b": addrB}})
+		},
+		"cluster": func() redis.UniversalClient {
+			return redis.NewClusterClient(&redis.ClusterOptions{
+				ClusterSlots: func(context.Context) ([]redis.ClusterSlot, error) {
+					return []redis.ClusterSlot{
+						{Start: 0, End: 8191, Nodes: []redis.ClusterNode{{Addr: addrA}}},
+						{Start: 8192, End: 16383, Nodes: []redis.ClusterNode{{Addr: addrB}}},
+					}, nil
+				},
+			})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, s := range servers {
+				require.NoError(t, s.FlushAll(ctx).Err())
+				require.NoError(t, s.ScriptFlush(ctx).Err())
+			}
+			client := newClient()
+			t.Cleanup(func() { _ = client.Close() })
+			c := New(client)
+
+			require.NoError(t, c.Invalidate(ctx, tags))
+			before := readCounters(t, client, tags)
+			assert.Empty(t, notBumped(tags, nil, before))
+			for _, s := range servers {
+				assert.Positive(t, s.DBSize(ctx).Val(), "counters on every server")
+				assert.Equal(t, []bool{true}, s.ScriptExists(ctx, bumpScriptSHA).Val(), "the script on every server")
+			}
+
+			for _, s := range servers {
+				require.NoError(t, s.ScriptFlush(ctx).Err())
+			}
+			require.NoError(t, c.Invalidate(ctx, tags))
+			assert.Empty(t, notBumped(tags, before, readCounters(t, client, tags)))
+		})
+	}
 }
 
 // An entry that isn't a valid envelope is a miss, not an error: the read
