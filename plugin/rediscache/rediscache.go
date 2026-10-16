@@ -16,7 +16,7 @@
 // either language to invalidate what the other cached. Data keys and their
 // envelope (see encodeEntry) are private to each side.
 //
-// Requires Redis >= 5 (EVAL calling TIME before a write).
+// Requires Redis >= 5 (a script calling TIME before a write).
 package rediscache
 
 import (
@@ -25,6 +25,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -43,6 +44,11 @@ const (
 	// counter outlives its last bump. It must exceed the time between a
 	// read's Get and its Set (the plugin drops Sets older than a minute).
 	markerSlack = 2 * time.Minute
+	// bumpBatch is how many tags Invalidate bumps per pipeline. A write
+	// that tags tens of thousands of rows sends them a batch at a time,
+	// not as one pipeline holding every command and reply in memory. The
+	// Node backend batches its bumps the same way.
+	bumpBatch = 1000
 )
 
 // bumpScript advances one tag's version: max(current+1, server time in
@@ -145,6 +151,9 @@ func WithMaxTTL(d time.Duration) Option {
 type Cache struct {
 	client redis.UniversalClient
 	maxTTL time.Duration
+	// bump runs bumpScript by its SHA; loaded is set once it was loaded.
+	bump   *redis.Script
+	loaded atomic.Bool
 }
 
 var _ plugin.Cache = (*Cache)(nil)
@@ -153,7 +162,7 @@ var _ plugin.Cache = (*Cache)(nil)
 // (*redis.Client, *redis.ClusterClient, *redis.Ring), so callers can point
 // this at the same Redis deployment the Node backend already talks to.
 func New(client redis.UniversalClient, opts ...Option) *Cache {
-	c := &Cache{client: client, maxTTL: DefaultMaxTTL}
+	c := &Cache{client: client, maxTTL: DefaultMaxTTL, bump: redis.NewScript(bumpScript)}
 	for _, o := range opts {
 		o(c)
 	}
@@ -225,18 +234,80 @@ func (c *Cache) Set(ctx context.Context, key string, value []byte, tags []string
 	return c.client.Set(ctx, key, encodeEntry(withAllTag(tags), versions, value), ttl).Err()
 }
 
-// Invalidate bumps every tag's version. Entries aren't deleted: the next
-// read of each finds it stale.
+// Invalidate bumps every tag's version, bumpBatch tags per pipeline, one
+// pipeline after another, running bumpScript by its SHA. Entries aren't
+// deleted: the next read of each finds it stale.
+//
+// A failed batch fails the call with its error, though the batches before
+// it went through: bumping a tag again is harmless, so the caller can
+// retry every tag.
 func (c *Cache) Invalidate(ctx context.Context, tags []string) error {
 	if len(tags) == 0 {
 		return nil
 	}
+	if !c.loaded.Load() {
+		if err := c.loadBump(ctx); err != nil {
+			return err
+		}
+	}
 	ttlMs := strconv.FormatInt(c.markerTTL().Milliseconds(), 10)
+	for batch := range slices.Chunk(tags, bumpBatch) {
+		noScript, err := c.bumpTags(ctx, batch, ttlMs)
+		if noScript {
+			// A node lost the script (SCRIPT FLUSH, a restart) or never
+			// had it (a failover, a new shard): load it, resend the batch.
+			if err := c.loadBump(ctx); err != nil {
+				return err
+			}
+			_, err = c.bumpTags(ctx, batch, ttlMs)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bumpTags bumps one batch of tags in a single pipeline. noScript reports
+// whether any node lacked the script: in a cluster only some may, so
+// theirs isn't necessarily the error Exec returns.
+func (c *Cache) bumpTags(ctx context.Context, tags []string, ttlMs string) (noScript bool, err error) {
 	pipe := c.client.Pipeline()
 	for _, tag := range tags {
-		pipe.Eval(ctx, bumpScript, []string{verPrefix + tag}, ttlMs)
+		c.bump.EvalSha(ctx, pipe, []string{verPrefix + tag}, ttlMs)
 	}
-	_, err := pipe.Exec(ctx)
+	cmds, err := pipe.Exec(ctx)
+	if err == nil {
+		return false, nil
+	}
+	for _, cmd := range cmds {
+		if redis.HasErrorPrefix(cmd.Err(), "NOSCRIPT") {
+			return true, err
+		}
+	}
+	return false, err
+}
+
+// loadBump loads bumpScript on every node a bump can be sent to. A plain
+// SCRIPT LOAD doesn't, through a ClusterClient (it also goes to replicas,
+// failing while one is down, though bumps only go to masters) or a Ring
+// (it goes to one random shard).
+func (c *Cache) loadBump(ctx context.Context) error {
+	load := func(ctx context.Context, node *redis.Client) error {
+		return c.bump.Load(ctx, node).Err()
+	}
+	var err error
+	switch client := c.client.(type) {
+	case *redis.ClusterClient:
+		err = client.ForEachMaster(ctx, load)
+	case *redis.Ring:
+		err = client.ForEachShard(ctx, load)
+	default:
+		err = c.bump.Load(ctx, client).Err()
+	}
+	if err == nil {
+		c.loaded.Store(true)
+	}
 	return err
 }
 
