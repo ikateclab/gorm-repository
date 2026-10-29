@@ -20,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.24'
+          go-version: '1.27.1'
 
       - name: Run tests
         run: |
@@ -53,6 +53,7 @@ jobs:
           - **Association Management**: Append, remove, and replace entity associations
           - **Flexible Querying**: Functional options for customizing queries
           - **Utilities**: CamelCase naming strategy and entity-to-map conversion
+          - **Query Caching**: Optional GORM plugin with in-memory and Redis backends, tag-based invalidation and transaction-aware semantics
           
           ### Installation
           ```bash

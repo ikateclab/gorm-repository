@@ -22,11 +22,7 @@ type fieldInfo struct {
 var (
 	typeCacheMutex sync.RWMutex
 	fieldInfoCache = make(map[reflect.Type]map[string]fieldInfo)
-	jsonNameCache  sync.Map
 )
-
-// Small field count optimization
-const smallFieldCount = 4
 
 // EntityToMap converts an entity into a map based on specified fields.
 func EntityToMap(fields map[string]interface{}, entity interface{}) (map[string]interface{}, error) {
@@ -39,47 +35,6 @@ func EntityToMap(fields map[string]interface{}, entity interface{}) (map[string]
 	// Create the update map with exact capacity
 	updateMap := make(map[string]interface{}, len(fields))
 
-	// Fast path for small field counts (common case)
-	if len(fields) <= smallFieldCount {
-		// Process each field
-		for key, value := range fields {
-			info, found := fieldInfoMap[key]
-			if !found {
-				return nil, errors.New("field not found in entity: " + key)
-			}
-
-			// Get field by index instead of by name (much faster)
-			fieldValue := entityValue.Field(info.Index)
-
-			// Handle pointer types
-			if info.IsPtr {
-				if fieldValue.IsNil() {
-					return nil, errors.New("nil pointer encountered for field: " + key)
-				}
-				fieldValue = fieldValue.Elem()
-			}
-
-			// Handle nested fields
-			if subMap, ok := value.(map[string]interface{}); ok {
-				subUpdateMap, err := handleNestedFields(fieldValue, subMap)
-				if err != nil {
-					return nil, err
-				}
-
-				jsonValue, err := json.Marshal(subUpdateMap)
-				if err != nil {
-					return nil, err
-				}
-
-				updateMap[info.ColumnName] = gorm.Expr("? || ?", clause.Column{Name: info.ColumnName}, string(jsonValue))
-			} else {
-				updateMap[info.ColumnName] = fieldValue.Interface()
-			}
-		}
-		return updateMap, nil
-	}
-
-	// Regular path for larger field counts
 	for key, value := range fields {
 		info, found := fieldInfoMap[key]
 		if !found {
@@ -267,36 +222,21 @@ func handleNestedFields(fieldValue reflect.Value, subMap map[string]interface{})
 	return subUpdateMap, nil
 }
 
-// getJSONName extracts the JSON field name from struct tags with caching
+// getJSONName extracts the JSON field name from struct tags. Its callers
+// cache the result per struct type (nestedFieldCache): a cache keyed by
+// field name alone would hand one type's tag to another type's
+// same-named field.
 func getJSONName(field reflect.StructField) string {
-	// Use unique key based on package path, struct and field name
-	cacheKey := field.PkgPath + "." + field.Name
-
-	// Check cache first
-	if cachedName, ok := jsonNameCache.Load(cacheKey); ok {
-		return cachedName.(string)
-	}
-
-	// Calculate JSON name
 	tag := field.Tag.Get("json")
-	var result string
-
 	if tag == "" || tag == "-" {
-		result = field.Name
-	} else {
-		// Get the part before the first comma
-		if idx := strings.IndexByte(tag, ','); idx != -1 {
-			tag = tag[:idx]
-		}
-
-		if tag == "" {
-			result = field.Name
-		} else {
-			result = tag
-		}
+		return field.Name
 	}
-
-	// Store in cache
-	jsonNameCache.Store(cacheKey, result)
-	return result
+	// Get the part before the first comma
+	if idx := strings.IndexByte(tag, ','); idx != -1 {
+		tag = tag[:idx]
+	}
+	if tag == "" {
+		return field.Name
+	}
+	return tag
 }
