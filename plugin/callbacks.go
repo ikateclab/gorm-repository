@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -607,40 +608,80 @@ func (p *Plugin) invalidateForWrite(db *gorm.DB, reason string) {
 	} else {
 		tags = p.tagsForWrite(db)
 	}
-	if len(tags) == 0 {
+	p.InvalidateWrite(db, modelLabel(db.Statement), reason, tags)
+}
+
+// InvalidateWrite invalidates the tags of a write the plugin's callbacks
+// don't see, as theirs are: on the commit of db's transaction, with its other
+// writes, when it exposes a CommitHook; inline otherwise. model and reason
+// label its event.
+func (p *Plugin) InvalidateWrite(db *gorm.DB, model, reason string, tags []string) {
+	if p.cache == nil || len(tags) == 0 {
 		return
 	}
-
-	// A write that already reached the database invalidates even if the
-	// request that made it is gone.
-	ctx := context.WithoutCancel(db.Statement.Context)
-	label := modelLabel(db.Statement)
+	w := invalidation{model: model, reason: reason, tags: tags}
 
 	// Always defer when a hook exists, whatever the TxMode: invalidating
 	// before commit lets a concurrent reader re-cache the old row, which
 	// then outlives the commit.
 	if hook, _ := txState(db); hook != nil {
-		hook.OnCommit(func(commitCtx context.Context) error {
-			p.options.metrics.Invalidation(label, reason)
-			commitCtx, cancel := context.WithTimeout(context.WithoutCancel(commitCtx), invalidateTimeout)
-			defer cancel()
-			err := p.invalidate(commitCtx, label, reason, tags)
-			if err != nil {
-				p.options.metrics.PostCommitError()
-			}
-			return err
-		})
+		p.deferInvalidation(hook, w)
 		return
 	}
 
-	p.options.metrics.Invalidation(label, reason)
-	ctx, cancel := context.WithTimeout(ctx, invalidateTimeout)
+	// A write that already reached the database invalidates even if the
+	// request that made it is gone.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(db.Statement.Context), invalidateTimeout)
 	defer cancel()
-	if err := p.invalidate(ctx, label, reason, tags); err != nil {
+	if err := p.invalidate(ctx, w); err != nil {
 		if p.options.debug {
 			log.Printf("[cache] Invalidate error: %v", err)
 		}
 	}
+}
+
+// txInvalidations are the invalidations a transaction's writes deferred to
+// its commit.
+type txInvalidations struct {
+	mu     sync.Mutex
+	writes []invalidation
+}
+
+// deferInvalidation adds w to the invalidations hook's transaction sends on
+// commit, all in one Invalidate: the hook runs its functions one after
+// another, and one per write would cost a round-trip each. Only the first
+// write registers one. A hook that can't key a map gets one per write.
+func (p *Plugin) deferInvalidation(hook CommitHook, w invalidation) {
+	if !reflect.TypeOf(hook).Comparable() {
+		hook.OnCommit(func(ctx context.Context) error { return p.invalidateOnCommit(ctx, w) })
+		return
+	}
+	v, loaded := p.txInvalidations.LoadOrStore(hook, &txInvalidations{})
+	pending := v.(*txInvalidations)
+	if !loaded {
+		hook.OnCommit(func(ctx context.Context) error {
+			// A write still to come on this hook starts another batch.
+			p.txInvalidations.CompareAndDelete(hook, pending)
+			pending.mu.Lock()
+			writes := pending.writes
+			pending.mu.Unlock()
+			return p.invalidateOnCommit(ctx, writes...)
+		})
+		hook.OnRollback(func() { p.txInvalidations.CompareAndDelete(hook, pending) })
+	}
+	pending.mu.Lock()
+	pending.writes = append(pending.writes, w)
+	pending.mu.Unlock()
+}
+
+func (p *Plugin) invalidateOnCommit(ctx context.Context, writes ...invalidation) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), invalidateTimeout)
+	defer cancel()
+	err := p.invalidate(ctx, writes...)
+	if err != nil {
+		p.options.metrics.PostCommitError()
+	}
+	return err
 }
 
 // readTags derives a SELECT's tags from the query alone, before it runs.

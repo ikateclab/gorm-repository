@@ -58,24 +58,24 @@ func TestCacheKey_NilStatement(t *testing.T) {
 	k1 := CacheKey(nil, "")
 	k2 := CacheKey(nil, "")
 	assert.Equal(t, k1, k2)
-	assert.True(t, strings.HasPrefix(k1, keyPrefix+"no-table:"))
+	assert.True(t, strings.HasPrefix(k1, keyPrefix+"mp1:no-table:"))
 }
 
 func TestCacheKey_Format(t *testing.T) {
 	k := CacheKey(makeStmt("t", "S", nil, nil), "")
-	assert.True(t, strings.HasPrefix(k, keyPrefix+"t:"), "key should be prefix-namespaced by table")
-	hash := strings.TrimPrefix(k, keyPrefix+"t:")
+	assert.True(t, strings.HasPrefix(k, keyPrefix+"mp1:t:"), "key should be prefix-namespaced by codec and table")
+	hash := strings.TrimPrefix(k, keyPrefix+"mp1:t:")
 	assert.Len(t, hash, 64, "SHA-256 hex digest")
 }
 
 func TestCacheKey_ReadablePrefix(t *testing.T) {
 	k := CacheKey(makeStmt("users", "S", nil, nil), "v1")
-	assert.True(t, strings.HasPrefix(k, keyPrefix+"v1:users:"))
+	assert.True(t, strings.HasPrefix(k, keyPrefix+"mp1:v1:users:"))
 }
 
 func TestCacheKey_NoTableFallback(t *testing.T) {
 	k := CacheKey(nil, "v1")
-	assert.True(t, strings.HasPrefix(k, keyPrefix+"v1:no-table:"))
+	assert.True(t, strings.HasPrefix(k, keyPrefix+"mp1:v1:no-table:"))
 }
 
 func TestCacheKey_KeyPrefix(t *testing.T) {
@@ -83,9 +83,19 @@ func TestCacheKey_KeyPrefix(t *testing.T) {
 	a := New(nil, WithKeyPrefix("svc-a")).cacheKey(s, "v1")
 	b := New(nil, WithKeyPrefix("svc-b")).cacheKey(s, "v1")
 
-	assert.True(t, strings.HasPrefix(a, keyPrefix+"svc-a:v1:users:"))
+	assert.True(t, strings.HasPrefix(a, keyPrefix+"svc-a:mp1:v1:users:"))
 	assert.NotEqual(t, a, b, "services sharing a cache must not share keys")
 	assert.Equal(t, CacheKey(s, "v1"), New(nil).cacheKey(s, "v1"), "no prefix keeps the plain layout")
+}
+
+func TestCacheKey_KeyName(t *testing.T) {
+	s := makeStmt("users", "S", nil, nil)
+	named := New(nil, WithKeyName(func(*gorm.Statement) string { return "User" })).cacheKey(s, "v1")
+	unnamed := New(nil, WithKeyName(func(*gorm.Statement) string { return "" })).cacheKey(s, "v1")
+
+	assert.Equal(t, keyPrefix+"mp1:v1:User:"+strings.TrimPrefix(CacheKey(s, "v1"), keyPrefix+"mp1:v1:users:"), named,
+		"only the readable segment changes")
+	assert.Equal(t, CacheKey(s, "v1"), unnamed, "an empty name falls back to the table")
 }
 
 func TestVarsSignature_Types(t *testing.T) {
@@ -194,10 +204,10 @@ func TestCacheKey_Golden(t *testing.T) {
 	byAccount := makeStmt("users", `SELECT * FROM "users" WHERE "users"."account_id" = $1`, []interface{}{id}, &[]goldenStruct{})
 	in := makeStmt("users", `SELECT * FROM "users" WHERE id IN ($1,$2)`, []interface{}{[]uuid.UUID{id, id}, "x"}, &[]*goldenStruct{})
 
-	assert.Equal(t, "cache:go:no-table:8712005d831d0d2940e7aa6842590d33727cd2cdd921b1157ad028a4f17555ef", buildCacheKey("", "", nil))
-	assert.Equal(t, "cache:go:users:e6958a4462776cf653b9fd3fc185d0756320990bdaf2c770588060ebf1072841", buildCacheKey("", "", byID))
-	assert.Equal(t, "cache:go:svc:v2:users:6a678573a77100f798ce036b207618a62f1f78d549c94c7b0511838020e97aba", buildCacheKey("svc", "v2", byAccount))
-	assert.Equal(t, "cache:go:p:users:0fb62455335a8723e8a1b7404d85ba8c2df2542781f5acb7f121c6c457d73669", buildCacheKey("p", "", in))
+	assert.Equal(t, "cache:go:mp1:no-table:8712005d831d0d2940e7aa6842590d33727cd2cdd921b1157ad028a4f17555ef", buildCacheKey("", "", "", nil))
+	assert.Equal(t, "cache:go:mp1:users:e6958a4462776cf653b9fd3fc185d0756320990bdaf2c770588060ebf1072841", buildCacheKey("", "", "", byID))
+	assert.Equal(t, "cache:go:svc:mp1:v2:users:6a678573a77100f798ce036b207618a62f1f78d549c94c7b0511838020e97aba", buildCacheKey("svc", "v2", "", byAccount))
+	assert.Equal(t, "cache:go:p:mp1:users:0fb62455335a8723e8a1b7404d85ba8c2df2542781f5acb7f121c6c457d73669", buildCacheKey("p", "", "", in))
 }
 
 // TestVarsSignature_UUID_DoesNotPanic is a regression test for a
@@ -254,19 +264,19 @@ func TestDedupeSorted(t *testing.T) {
 	assert.Nil(t, dedupeSorted(nil))
 }
 
-// WithKeyPrefix("x") and WithSchemaVersion("x") render the same readable
-// key; the hash used to be identical too.
+// WithKeyPrefix("x") and WithSchemaVersion("x") used to render the same
+// readable key and the same hash.
 func TestCacheKey_PrefixAndSchemaVersionDontCollide(t *testing.T) {
 	s := makeStmt("users", "S", nil, nil)
 	prefixed := New(nil, WithKeyPrefix("x")).cacheKey(s, "")
 	versioned := New(nil).cacheKey(s, "x")
 
-	assert.True(t, strings.HasPrefix(prefixed, keyPrefix+"x:users:"))
-	assert.True(t, strings.HasPrefix(versioned, keyPrefix+"x:users:"), "the readable part is unchanged")
-	assert.NotEqual(t, prefixed, versioned)
+	assert.True(t, strings.HasPrefix(prefixed, keyPrefix+"x:mp1:users:"))
+	assert.True(t, strings.HasPrefix(versioned, keyPrefix+"mp1:x:users:"))
+	assert.NotEqual(t, strings.TrimPrefix(prefixed, keyPrefix+"x:mp1:users:"), strings.TrimPrefix(versioned, keyPrefix+"mp1:x:users:"))
 
 	// Nor can one field's value spill into the other's.
-	assert.NotEqual(t, buildCacheKey("a|schema=b", "", s), buildCacheKey("a", "b", s))
+	assert.NotEqual(t, buildCacheKey("a|schema=b", "", "", s), buildCacheKey("a", "b", "", s))
 }
 
 // A per-call SchemaVersionSetting keys and tags the read like a plugin-wide
@@ -277,9 +287,9 @@ func TestCacheKey_PerCallSchemaVersion(t *testing.T) {
 
 	var a, b, c testUser
 	require.NoError(t, db.First(&a, 1).Error)
-	assert.True(t, strings.HasPrefix(rec.last(EventMiss).Key, keyPrefix+"v1:test_users:"))
+	assert.True(t, strings.HasPrefix(rec.last(EventMiss).Key, keyPrefix+"mp1:v1:test_users:"))
 	require.NoError(t, db.Set(SchemaVersionSetting, "v2").First(&b, 1).Error)
-	assert.True(t, strings.HasPrefix(rec.last(EventMiss).Key, keyPrefix+"v2:test_users:"))
+	assert.True(t, strings.HasPrefix(rec.last(EventMiss).Key, keyPrefix+"mp1:v2:test_users:"))
 	require.NoError(t, db.Set(SchemaVersionSetting, "v2").First(&c, 1).Error)
 	assert.Equal(t, 2, met.misses)
 	assert.Equal(t, 1, met.hits)

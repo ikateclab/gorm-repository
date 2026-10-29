@@ -50,18 +50,35 @@ func (p *Plugin) emit(ctx context.Context, e Event) {
 
 func (p *Plugin) set(ctx context.Context, key, model string, data []byte, tags []string, ttl time.Duration, versions Versions) error {
 	if err := p.cache.Set(ctx, key, data, tags, ttl, versions); err != nil {
-		p.emit(ctx, Event{Kind: EventError, Model: model, Key: key, Reason: "set", Err: err})
+		p.emit(ctx, Event{Kind: EventError, Model: model, Key: key, Reason: "set", Tags: tags, Err: err})
 		return err
 	}
 	p.emit(ctx, Event{Kind: EventSet, Model: model, Key: key, Tags: tags})
 	return nil
 }
 
-func (p *Plugin) invalidate(ctx context.Context, model, reason string, tags []string) error {
-	if err := p.cache.Invalidate(ctx, tags); err != nil {
-		p.emit(ctx, Event{Kind: EventError, Model: model, Reason: "invalidate", Tags: tags, Err: err})
-		return err
+// invalidation is one write's: its model, why (create/update/delete/exec)
+// and its tags.
+type invalidation struct {
+	model, reason string
+	tags          []string
+}
+
+// invalidate bumps the tags of every write in one Invalidate, with an event
+// per write.
+func (p *Plugin) invalidate(ctx context.Context, writes ...invalidation) error {
+	var tags []string
+	for _, w := range writes {
+		p.options.metrics.Invalidation(w.model, w.reason)
+		tags = append(tags, w.tags...)
 	}
-	p.emit(ctx, Event{Kind: EventInvalidate, Model: model, Reason: reason, Tags: tags})
-	return nil
+	err := p.cache.Invalidate(ctx, dedupeSorted(tags))
+	for _, w := range writes {
+		if err != nil {
+			p.emit(ctx, Event{Kind: EventError, Model: w.model, Reason: "invalidate", Tags: w.tags, Err: err})
+		} else {
+			p.emit(ctx, Event{Kind: EventInvalidate, Model: w.model, Reason: w.reason, Tags: w.tags})
+		}
+	}
+	return err
 }

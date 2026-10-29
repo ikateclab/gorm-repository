@@ -304,6 +304,70 @@ func TestCallback_TxDeferred_DefersInvalidation(t *testing.T) {
 	assert.Equal(t, 0, mc.Len(), "cache should be cleared after commit")
 }
 
+// A transaction's writes are invalidated together on commit, in one
+// Invalidate, still with an event and a metric per write.
+func TestCallback_TxWrites_InvalidatedTogetherOnCommit(t *testing.T) {
+	db, sc, mc, rec, met := setupScriptedDB(t, WithDefaultTxMode(TxDeferred))
+	require.NoError(t, db.Create(&testUser{ID: 1, Name: "alice"}).Error)
+	var warm testUser
+	require.NoError(t, db.First(&warm, 1).Error)
+	invalidations := sc.invalidations
+
+	hook := &fakeHook{}
+	txDB := db.Set(CommitHookKey, CommitHook(hook))
+	require.NoError(t, txDB.Model(&testUser{ID: 1}).Update("name", "bob").Error)
+	require.NoError(t, txDB.Create(&testUser{ID: 2, Name: "carol"}).Error)
+	require.Len(t, hook.commits, 1, "one commit function for the whole transaction")
+	assert.Equal(t, invalidations, sc.invalidations)
+	assert.Equal(t, 1, mc.Len())
+
+	met.invalidations = 0
+	require.NoError(t, hook.commits[0](context.Background()))
+	assert.Equal(t, invalidations+1, sc.invalidations)
+	assert.Equal(t, 0, mc.Len())
+	assert.Equal(t, 2, met.invalidations)
+	assert.Len(t, rec.kindsOf(EventInvalidate), 3, "the write before the transaction, then one per write in it")
+
+	require.NoError(t, txDB.Model(&testUser{ID: 2}).Update("name", "dan").Error)
+	assert.Len(t, hook.commits, 2, "a write after the commit starts another batch")
+}
+
+// A write the callbacks don't see joins the others of its transaction.
+func TestInvalidateWrite_JoinsTheTransactionsWrites(t *testing.T) {
+	db, sc, _, rec, _ := setupScriptedDB(t, WithDefaultTxMode(TxDeferred))
+	hook := &fakeHook{}
+	txDB := db.Set(CommitHookKey, CommitHook(hook))
+	p := db.Config.Plugins[pluginName].(*Plugin)
+
+	require.NoError(t, txDB.Create(&testUser{ID: 1, Name: "alice"}).Error)
+	p.InvalidateWrite(txDB, "testUser", "exec", []string{"raw:1"})
+	require.Len(t, hook.commits, 1)
+	assert.Zero(t, sc.invalidations)
+
+	require.NoError(t, hook.commits[0](context.Background()))
+	assert.Equal(t, 1, sc.invalidations)
+	e := rec.last(EventInvalidate)
+	assert.Equal(t, "exec", e.Reason)
+	assert.Equal(t, []string{"raw:1"}, e.Tags)
+
+	p.InvalidateWrite(db, "testUser", "exec", []string{"raw:2"})
+	assert.Equal(t, 2, sc.invalidations, "outside a transaction, inline")
+}
+
+// A rolled-back transaction's writes are dropped: the next transaction on
+// the same hook starts a batch of its own.
+func TestCallback_TxWrites_RollbackDropsTheBatch(t *testing.T) {
+	db, _, _ := setupCachedDB(t, WithDefaultTxMode(TxDeferred))
+	hook := &fakeHook{}
+	txDB := db.Set(CommitHookKey, CommitHook(hook))
+
+	require.NoError(t, txDB.Create(&testUser{ID: 1, Name: "alice"}).Error)
+	require.Len(t, hook.rollbacks, 1)
+	hook.rollbacks[0]()
+	require.NoError(t, txDB.Create(&testUser{ID: 2, Name: "bob"}).Error)
+	assert.Len(t, hook.commits, 2)
+}
+
 func TestCallback_PendingTracker_SkipsCache(t *testing.T) {
 	db, mc, met := setupCachedDB(t)
 
