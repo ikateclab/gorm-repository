@@ -22,16 +22,22 @@ import (
 const keyPrefix = "cache:go:"
 
 // CacheKey derives a deterministic cache key from a GORM statement, in the
-// form "cache:go:{schemaVersion:}{table}:{hash}" — schemaVersion and table
-// kept readable for inspection, the hash (codec + SQL + vars + dest type)
-// covering everything that actually varies between queries on that table.
+// form "cache:go:{codecVersion}:{schemaVersion:}{table}:{hash}" — the
+// codec, schemaVersion and table kept readable for inspection (a SCAN can
+// tell entries of an older codec apart), the hash (codec + SQL + vars +
+// dest type) covering everything that actually varies between queries.
 func CacheKey(stmt *gorm.Statement, schemaVersion string) string {
-	return buildCacheKey("", schemaVersion, stmt)
+	return buildCacheKey("", schemaVersion, "", stmt)
 }
 
-// cacheKey is CacheKey plus the plugin's WithKeyPrefix namespace.
+// cacheKey is CacheKey plus the plugin's WithKeyPrefix namespace and
+// WithKeyName segment.
 func (p *Plugin) cacheKey(stmt *gorm.Statement, schemaVersion string) string {
-	return buildCacheKey(p.options.keyPrefix, schemaVersion, stmt)
+	name := ""
+	if p.options.keyName != nil && stmt != nil {
+		name = p.options.keyName(stmt)
+	}
+	return buildCacheKey(p.options.keyPrefix, schemaVersion, name, stmt)
 }
 
 // keyBufPool holds the scratch buffers buildCacheKey hashes, so a key
@@ -41,8 +47,9 @@ var keyBufPool = sync.Pool{New: func() interface{} { b := make([]byte, 0, 512); 
 
 const maxPooledKeyBuf = 64 << 10
 
-// buildCacheKey renders "cache:go:{prefix:}{schemaVersion:}{table}:{hash}".
-func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
+// buildCacheKey renders "cache:go:{prefix:}{codecVersion}:{schemaVersion:}{name}:{hash}",
+// name defaulting to the table.
+func buildCacheKey(prefix, schemaVersion, name string, stmt *gorm.Statement) string {
 	// prefix and schemaVersion are labelled: the readable part can't tell
 	// WithKeyPrefix("x") from WithSchemaVersion("x"), so the hash must.
 	bp := keyBufPool.Get().(*[]byte)
@@ -69,21 +76,26 @@ func buildCacheKey(prefix, schemaVersion string, stmt *gorm.Statement) string {
 		keyBufPool.Put(bp)
 	}
 
-	if table == "" {
-		table = "no-table"
+	if name == "" {
+		name = table
+	}
+	if name == "" {
+		name = "no-table"
 	}
 	var key strings.Builder
-	key.Grow(len(keyPrefix) + len(prefix) + len(schemaVersion) + len(table) + 3 + hex.EncodedLen(len(sum)))
+	key.Grow(len(keyPrefix) + len(prefix) + len(codecVersion) + len(schemaVersion) + len(name) + 4 + hex.EncodedLen(len(sum)))
 	key.WriteString(keyPrefix)
 	if prefix != "" {
 		key.WriteString(prefix)
 		key.WriteByte(':')
 	}
+	key.WriteString(codecVersion)
+	key.WriteByte(':')
 	if schemaVersion != "" {
 		key.WriteString(schemaVersion)
 		key.WriteByte(':')
 	}
-	key.WriteString(table)
+	key.WriteString(name)
 	key.WriteByte(':')
 	var digest [2 * sha256.Size]byte
 	hex.Encode(digest[:], sum[:])

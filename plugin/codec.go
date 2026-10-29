@@ -11,8 +11,8 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// codecVersion is mixed into CacheKey's hash, so entries written by a
-// different encoding are never decoded by this one.
+// codecVersion is a segment of CacheKey, and mixed into its hash, so
+// entries written by a different encoding are never decoded by this one.
 const codecVersion = "mp1"
 
 // Every cached payload starts with one of these bytes.

@@ -264,6 +264,40 @@ func (failingInvalidations) Invalidate(context.Context, []string) error {
 	return errors.New("cache down")
 }
 
+// countingInvalidations counts the Invalidate calls reaching a cache.
+type countingInvalidations struct {
+	plugin.Cache
+	calls atomic.Int32
+}
+
+func (c *countingInvalidations) Invalidate(ctx context.Context, tags []string) error {
+	c.calls.Add(1)
+	return c.Cache.Invalidate(ctx, tags)
+}
+
+// A transaction's writes reach the cache in one Invalidate, on commit.
+func TestTx_WritesInvalidatedTogetherOnCommit(t *testing.T) {
+	cache := &countingInvalidations{Cache: memory.New()}
+	_, repo := openTxCacheDB(t, cache)
+	ctx := context.Background()
+	a, b := uuid.New(), uuid.New()
+	require.NoError(t, repo.Create(ctx, &txCacheTestWidget{Id: a, Name: "a"}))
+	_, err := repo.FindById(ctx, a)
+	require.NoError(t, err)
+	cache.calls.Store(0)
+
+	tx := repo.BeginTransaction()
+	require.NoError(t, repo.UpdateById(ctx, a, &txCacheTestWidget{Id: a, Name: "a2"}, WithTx(tx)))
+	require.NoError(t, repo.Create(ctx, &txCacheTestWidget{Id: b, Name: "b"}, WithTx(tx)))
+	assert.Zero(t, cache.calls.Load())
+	require.NoError(t, tx.Commit())
+	assert.Equal(t, int32(1), cache.calls.Load())
+
+	got, err := repo.FindById(ctx, a)
+	require.NoError(t, err)
+	assert.Equal(t, "a2", got.Name)
+}
+
 // postCommitMetrics counts PostCommitError calls.
 type postCommitMetrics struct {
 	plugin.Metrics
