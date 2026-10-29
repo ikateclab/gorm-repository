@@ -11,6 +11,8 @@ import (
 	"context"
 	"reflect"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // Versions is a backend's snapshot of how far each of a read's tags had
@@ -64,6 +66,7 @@ type options struct {
 	defaultTxMode  TxMode
 	schemaVersion  string
 	keyPrefix      string
+	keyName        func(*gorm.Statement) string
 	debug          bool
 	scopeColumns   []string
 	metrics        Metrics
@@ -119,6 +122,13 @@ func WithSchemaVersion(v string) Option {
 // same-named tables. Tags are not prefixed: invalidation stays shared.
 func WithKeyPrefix(prefix string) Option {
 	return func(o *options) { o.keyPrefix = prefix }
+}
+
+// WithKeyName names a key's readable segment, e.g. by the model name the
+// application uses elsewhere, instead of the table. An empty name falls
+// back to the table. Only the readable part changes: the hash does not.
+func WithKeyName(fn func(*gorm.Statement) string) Option {
+	return func(o *options) { o.keyName = fn }
 }
 
 // WithDebug enables verbose logging of cache decisions. Intended for

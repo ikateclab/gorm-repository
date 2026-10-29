@@ -136,6 +136,7 @@ func TestEvents_CacheErrors(t *testing.T) {
 		e := rec.last(EventError)
 		assert.Equal(t, "set", e.Reason)
 		assert.ErrorIs(t, e.Err, errDown)
+		assert.NotEmpty(t, e.Tags, "the read's, as on the other events of the read")
 		assert.Empty(t, rec.kindsOf(EventSet))
 		assert.Zero(t, mc.Len())
 	})

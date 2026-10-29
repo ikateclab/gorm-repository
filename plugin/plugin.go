@@ -21,6 +21,10 @@ type Plugin struct {
 
 	registry   map[string]*ModelOptions
 	registryMu sync.RWMutex
+
+	// txInvalidations holds, per CommitHook, what its transaction's writes
+	// invalidate on commit.
+	txInvalidations sync.Map // CommitHook -> *txInvalidations
 }
 
 // ModelOptions holds per-model configuration, populated via
