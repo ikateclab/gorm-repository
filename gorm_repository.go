@@ -85,7 +85,9 @@ func (r *GormRepository[T]) FindPaginated(ctx context.Context, page int, pageSiz
 	var totalRows int64
 
 	db := applyOptions(r.DB, options).WithContext(ctx)
-	db.Model(&entities).Count(&totalRows)
+	if err := db.Model(&entities).Count(&totalRows).Error; err != nil {
+		return nil, err
+	}
 
 	offset := (page - 1) * pageSize
 	if err := db.Offset(offset).Limit(pageSize).Find(&entities).Error; err != nil {
@@ -263,6 +265,9 @@ func (r *GormRepository[T]) UpdateById(ctx context.Context, id uuid.UUID, entity
 	clone := getCloneForDiff(db, entity)
 
 	diff := diffable.Diff(clone)
+
+	delete(diff, "UpdatedAt")
+
 	if len(diff) == 0 {
 		return nil // No changes
 	}
