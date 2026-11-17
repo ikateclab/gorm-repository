@@ -401,6 +401,8 @@ type Tx struct {
 	// key is a unique identifier for the entity, value is the cloned entity snapshot
 	clonedEntities map[string]interface{}
 	mutex          sync.RWMutex
+	parent         *Tx
+	afterCommit    []func()
 }
 
 // BeginTransaction starts a nested transaction
@@ -411,7 +413,19 @@ func (tx *Tx) BeginTransaction() *Tx {
 		committed:      false,
 		rolledBack:     false,
 		clonedEntities: make(map[string]interface{}),
+		parent:         tx,
 	}
+}
+
+// AfterCommit runs fn once the outermost transaction commits.
+func (tx *Tx) AfterCommit(fn func()) {
+	root := tx
+	for root.parent != nil {
+		root = root.parent
+	}
+	root.mutex.Lock()
+	defer root.mutex.Unlock()
+	root.afterCommit = append(root.afterCommit, fn)
 }
 
 // Commit commits the transaction
@@ -421,10 +435,16 @@ func (tx *Tx) Commit() error {
 	}
 
 	err := tx.gtx.Commit().Error
-	if err == nil {
-		tx.committed = true
+	if err != nil {
+		return err
 	}
-	return err
+	tx.committed = true
+	if tx.parent == nil {
+		for _, fn := range tx.afterCommit {
+			fn()
+		}
+	}
+	return nil
 }
 
 // Rollback rolls back the transaction

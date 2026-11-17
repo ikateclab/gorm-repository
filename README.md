@@ -191,6 +191,23 @@ err = userRepo.RemoveAssociation(ctx, user, "Posts", []Post{oldPost})
 err = userRepo.ReplaceAssociation(ctx, user, "Posts", []Post{post1, post2})
 ```
 
+### Read Replica Routing (PgDog)
+
+`ReplicaRouting` keeps read-after-write consistency when reads go to an asynchronous replica through
+[PgDog](https://docs.pgdog.dev). Every write records `last_write:<accountId>:<table>` for `TTL`, after
+the repository `Tx` commits. A read whose account and tables were written within `TTL` gets the
+`/* pgdog_role: primary */` hint; every other standalone read is left for PgDog to send to the replica.
+
+```go
+db.Use(&gormrepository.ReplicaRouting{Store: store, TTL: 100 * time.Millisecond})
+```
+
+- `Store` implements `LastWriteStore` (`Mark` and `AnyRecent`), usually Redis keys with a TTL. A store
+  error sends the read to the primary.
+- Reads without an `accountId = ?` condition, raw SQL and string joins always go to the primary.
+- Raw writes (`db.Exec`) mark `last_write:_global:<table>`, which every account checks.
+- `TTL` must exceed PgDog's `ban_replica_lag + lsn_check_interval`.
+
 ## Repository Interface
 
 The repository implements the following interface:
