@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -55,6 +56,16 @@ type ReplicaRouting struct {
 	// LsnReadArgs go to the driver before the args of a read with an LSN. Every LSN makes a distinct SQL, so
 	// with pgx pass pgx.QueryExecModeExec to keep those reads out of the prepared statement caches.
 	LsnReadArgs []any
+
+	lsnMu    sync.Mutex
+	nextLsn  *lsnBatch
+	querying bool
+}
+
+// lsnBatch is the writes served by one LSN query, all committed before it starts.
+type lsnBatch struct {
+	done chan struct{}
+	lsn  uint64
 }
 
 // readAccountKey carries a query's account to its preloads, whose WHERE has only the foreign key.
@@ -178,16 +189,51 @@ func (r *ReplicaRouting) mark(db *gorm.DB, key string) {
 	ctx := context.WithoutCancel(db.Statement.Context)
 	if v, ok := db.Get(txContextKey); ok {
 		if tx, ok := v.(*Tx); ok {
-			tx.afterCommitWrites(key, func(keys []string) { _ = r.Store.Mark(ctx, keys, r.currentLsn(ctx), r.TTL) })
+			tx.afterCommitWrites(key, func(keys []string) { _ = r.Store.Mark(ctx, keys, r.lsnAfterCommit(ctx), r.TTL) })
 			return
 		}
 	}
 	lsn := uint64(unknownLsn)
 	// A plain GORM transaction has no commit hook, so its commit LSN is unknown.
 	if !inTransaction(db) {
-		lsn = r.currentLsn(ctx)
+		lsn = r.lsnAfterCommit(ctx)
 	}
 	_ = r.Store.Mark(ctx, []string{key}, lsn, r.TTL)
+}
+
+// lsnAfterCommit runs one LSN query at a time: writes that commit during it wait for the next one, which serves them all.
+func (r *ReplicaRouting) lsnAfterCommit(ctx context.Context) uint64 {
+	b := r.joinLsnBatch(ctx)
+	<-b.done
+	return b.lsn
+}
+
+func (r *ReplicaRouting) joinLsnBatch(ctx context.Context) *lsnBatch {
+	r.lsnMu.Lock()
+	defer r.lsnMu.Unlock()
+	if r.nextLsn == nil {
+		r.nextLsn = &lsnBatch{done: make(chan struct{})}
+	}
+	if !r.querying {
+		r.querying = true
+		go r.queryLsnBatches(ctx)
+	}
+	return r.nextLsn
+}
+
+func (r *ReplicaRouting) queryLsnBatches(ctx context.Context) {
+	for {
+		r.lsnMu.Lock()
+		b := r.nextLsn
+		r.nextLsn = nil
+		r.querying = b != nil
+		r.lsnMu.Unlock()
+		if b == nil {
+			return
+		}
+		b.lsn = r.currentLsn(ctx)
+		close(b.done)
+	}
 }
 
 func (r *ReplicaRouting) currentLsn(ctx context.Context) uint64 {

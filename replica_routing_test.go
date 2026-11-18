@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -396,6 +397,32 @@ func TestReplicaRoutingRollbackDoesNotMark(t *testing.T) {
 	}
 	if len(s.store.keys) != 0 || *s.lsnCalls != 0 {
 		t.Fatalf("rollback should not mark: %v", s.store.keys)
+	}
+}
+
+func TestReplicaRoutingWritesDuringAnLsnQueryShareTheNext(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var calls atomic.Uint64
+	r := &ReplicaRouting{CurrentLsn: func(context.Context) (uint64, error) {
+		started <- struct{}{}
+		<-release
+		return calls.Add(1), nil
+	}}
+	ctx := context.Background()
+
+	running := r.joinLsnBatch(ctx)
+	<-started
+	during := []*lsnBatch{r.joinLsnBatch(ctx), r.joinLsnBatch(ctx)}
+	close(release)
+	<-running.done
+	<-during[0].done
+
+	if during[0] != during[1] || during[0] == running {
+		t.Fatal("writes committed during a query should share the next one")
+	}
+	if running.lsn != 1 || during[0].lsn != 2 || calls.Load() != 2 {
+		t.Fatalf("lsn running=%d during=%d calls=%d", running.lsn, during[0].lsn, calls.Load())
 	}
 }
 
