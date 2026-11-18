@@ -2,6 +2,7 @@ package gormrepository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -27,8 +28,8 @@ type LastWriteStore interface {
 }
 
 const (
-	primaryHint   = "/* pgdog_role: primary */ "
-	lsnHintPrefix = "/* pgdog_lsn: "
+	replicaHint   = "/* pgdog_role: replica */ "
+	lsnHintPrefix = "/* pgdog_role: replica pgdog_lsn: "
 	globalScope   = "_global"
 	anyTable      = "*"
 	accountColumn = "accountId"
@@ -44,8 +45,9 @@ var (
 	exprColumnsRe = regexp.MustCompile(`^\s*(?:"?\w+"?\.)?"?(\w+)"?\s*=\s*\?\s*$`)
 )
 
-// ReplicaRouting tags a read with the LSN of the latest write of its account and tables, so PgDog only
-// sends it to a replica that has replayed that write. A nil Store sends every read to the primary.
+// ReplicaRouting opts the reads of a known account and tables into the replicas of a PgDog in prefer_primary, with
+// the LSN of their latest write, so PgDog only sends them to a replica that has replayed it. Other reads go untagged
+// to the primary.
 type ReplicaRouting struct {
 	Store LastWriteStore
 	// TTL keeps a write's LSN. Past it, only PgDog's lag ban protects the read: TTL must exceed
@@ -74,10 +76,13 @@ type readAccountKey struct{}
 func (r *ReplicaRouting) Name() string { return "gormrepository:replica_routing" }
 
 func (r *ReplicaRouting) Initialize(db *gorm.DB) error {
+	if r.Store == nil {
+		return errors.New("replica routing needs a Store")
+	}
 	if r.CurrentLsn == nil {
 		r.CurrentLsn = func(ctx context.Context) (uint64, error) {
 			var lsn string
-			if err := db.WithContext(ctx).Raw(primaryHint + "SELECT pg_current_wal_insert_lsn()::text").Scan(&lsn).Error; err != nil {
+			if err := db.WithContext(ctx).Raw("SELECT pg_current_wal_insert_lsn()::text").Scan(&lsn).Error; err != nil {
 				return 0, err
 			}
 			return parseLsn(lsn)
@@ -138,8 +143,8 @@ func (r *ReplicaRouting) readHint(stmt *gorm.Statement) string {
 		accountID, ok = scopeValue(stmt.Context.Value(readAccountKey{}), true)
 	}
 	tables, known := readTables(stmt)
-	if r.Store == nil || !ok || !known {
-		return primaryHint
+	if !ok || !known {
+		return ""
 	}
 	keys := make([]string, 0, 2*(len(tables)+1))
 	for _, table := range append(tables, anyTable) {
@@ -147,10 +152,10 @@ func (r *ReplicaRouting) readHint(stmt *gorm.Statement) string {
 	}
 	lsn, err := r.Store.LastLsn(stmt.Context, keys)
 	if err != nil {
-		return primaryHint
+		return ""
 	}
 	if lsn == 0 {
-		return ""
+		return replicaHint
 	}
 	return fmt.Sprintf("%s%X/%X */ ", lsnHintPrefix, lsn>>32, uint32(lsn))
 }
@@ -183,9 +188,6 @@ func (r *ReplicaRouting) markRaw(db *gorm.DB) {
 
 // mark records the write with the primary's LSN once it is committed: now, or when the repository Tx commits.
 func (r *ReplicaRouting) mark(db *gorm.DB, key string) {
-	if r.Store == nil {
-		return
-	}
 	ctx := context.WithoutCancel(db.Statement.Context)
 	if v, ok := db.Get(txContextKey); ok {
 		if tx, ok := v.(*Tx); ok {

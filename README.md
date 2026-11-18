@@ -193,11 +193,13 @@ err = userRepo.ReplaceAssociation(ctx, user, "Posts", []Post{post1, post2})
 
 ### Read Replica Routing (PgDog)
 
-`ReplicaRouting` keeps read-after-write consistency when reads go to an asynchronous replica through
-[PgDog](https://docs.pgdog.dev) (v0.1.64 or later). Every write records the primary's WAL position
-(`pg_current_wal_insert_lsn()`) in `last_write:<accountId>:<table>` for `TTL`, after the repository `Tx`
-commits. A read of an account and tables with a recorded LSN gets `/* pgdog_lsn: X/Y */`, so PgDog only
-sends it to a replica that has replayed that write, or to the primary; other standalone reads go to any replica.
+`ReplicaRouting` sends reads to an asynchronous replica through [PgDog](https://docs.pgdog.dev) (v0.1.64 or
+later) with `read_write_split = "prefer_primary"`, keeping read-after-write consistency. PgDog then sends every
+query to the primary unless it opts in, so without the plugin nothing reaches the replica. Every write records the
+primary's WAL position (`pg_current_wal_insert_lsn()`) in `last_write:<accountId>:<table>` for `TTL`, after the
+repository `Tx` commits. A standalone read of a known account and tables gets `/* pgdog_role: replica */`, or
+`/* pgdog_role: replica pgdog_lsn: X/Y */` when those tables have a recorded LSN, so PgDog only sends it to a
+replica that has replayed that write, or to the primary.
 
 ```go
 db.Use(&gormrepository.ReplicaRouting{
@@ -211,9 +213,9 @@ db.Use(&gormrepository.ReplicaRouting{
   new prepared statement in pgx, PgDog and Postgres. `LsnReadArgs` go to the driver before those reads' args
   only; `pgx.QueryExecModeExec` runs them unprepared and leaves the cache to the other queries.
 
-- `Store` implements `LastWriteStore` (`Mark` keeps the highest LSN per key, `LastLsn` returns the highest
-  of the keys), usually Redis keys with a TTL. A store error sends the read to the primary. A nil `Store`
-  sends every read to the primary.
+- `Store` (required) implements `LastWriteStore` (`Mark` keeps the highest LSN per key, `LastLsn` returns the
+  highest of the keys), usually Redis keys with a TTL. A store error sends the read to the primary. To turn
+  replica reads off, don't register the plugin.
 - Reads without an `accountId = ?` condition, raw SQL and string joins always go to the primary. Preloads
   take the account of the query that loads them, and check their own table.
 - Raw writes (`db.Exec`) mark `last_write:_global:<table>`, which every account checks.

@@ -92,7 +92,7 @@ func (s rrSetup) clear() {
 	*s.lsnCalls = 0
 }
 
-const firstLsnHint = "/* pgdog_lsn: 1/1 */ "
+const firstLsnHint = "/* pgdog_role: replica pgdog_lsn: 1/1 */ "
 
 func hintOf(sql string) string {
 	if !strings.HasPrefix(sql, "/*") {
@@ -111,7 +111,7 @@ func TestReplicaRouting(t *testing.T) {
 	}
 
 	_, _ = repo.FindMany(ctx, ofAccount(acc))
-	if hint := hintOf(s.last()); hint != "" {
+	if hint := hintOf(s.last()); hint != replicaHint {
 		t.Fatalf("read without recent write should go to any replica: %s", s.last())
 	}
 
@@ -135,23 +135,23 @@ func TestReplicaRouting(t *testing.T) {
 	}
 
 	_, _ = repo.FindMany(ctx, ofAccount(other))
-	if hint := hintOf(s.last()); hint != "" {
+	if hint := hintOf(s.last()); hint != replicaHint {
 		t.Fatalf("another account should not wait for the write: %s", s.last())
 	}
 
 	deps := NewGormRepository[rrDepartment](s.db)
 	_, _ = deps.FindMany(ctx, WithQuery(func(d *gorm.DB) *gorm.DB { return d.Where(`"accountId" = ?`, acc) }))
-	if hint := hintOf(s.last()); hint != "" {
+	if hint := hintOf(s.last()); hint != replicaHint {
 		t.Fatalf("another table of the same account should not wait for the write: %s", s.last())
 	}
 
 	_, _ = repo.FindMany(ctx, WithQuery(func(d *gorm.DB) *gorm.DB { return d.Joins("Department").Where(`"rr_contacts"."accountId" = ?`, other) }))
-	if hint := hintOf(s.last()); hint != "" {
+	if hint := hintOf(s.last()); hint != replicaHint {
 		t.Fatalf("known join without recent write should go to any replica: %s", s.last())
 	}
 
 	_, _ = repo.FindMany(ctx)
-	if hint := hintOf(s.last()); hint != primaryHint {
+	if hint := hintOf(s.last()); hint != "" {
 		t.Fatalf("read without account should go to the primary: %s", s.last())
 	}
 
@@ -217,7 +217,7 @@ func TestReplicaRoutingUnknownLsnReadsFromThePrimary(t *testing.T) {
 	}
 
 	_, _ = repo.FindMany(ctx, WithQuery(func(d *gorm.DB) *gorm.DB { return d.Where(`"accountId" = ?`, withoutLsn) }))
-	if hint := hintOf(s.last()); hint != "/* pgdog_lsn: FFFFFFFF/FFFFFFFF */ " {
+	if hint := hintOf(s.last()); hint != "/* pgdog_role: replica pgdog_lsn: FFFFFFFF/FFFFFFFF */ " {
 		t.Fatalf("an unknown LSN should exclude every replica: %s", s.last())
 	}
 }
@@ -228,7 +228,7 @@ func TestReplicaRoutingStoreErrorReadsFromThePrimary(t *testing.T) {
 
 	_, _ = NewGormRepository[rrContact](s.db).FindMany(context.Background(),
 		WithQuery(func(d *gorm.DB) *gorm.DB { return d.Where(`"accountId" = ?`, uuid.New()) }))
-	if hint := hintOf(s.last()); hint != primaryHint {
+	if hint := hintOf(s.last()); hint != "" {
 		t.Fatalf("a store error should send the read to the primary: %s", s.last())
 	}
 }
@@ -279,18 +279,15 @@ func TestReplicaRoutingLsnReadArgs(t *testing.T) {
 }
 
 func TestReplicaRoutingWithoutStore(t *testing.T) {
-	s := setupRR(t)
-	s.routing.Store = nil
-	repo := NewGormRepository[rrContact](s.db)
-	acc := uuid.New()
-	ctx := context.Background()
-
-	if err := repo.Create(ctx, &rrContact{ID: uuid.New(), AccountId: acc}); err != nil {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = repo.FindMany(ctx, WithQuery(func(d *gorm.DB) *gorm.DB { return d.Where(`"accountId" = ?`, acc) }))
-	if hint := hintOf(s.last()); hint != primaryHint || *s.lsnCalls != 0 {
-		t.Fatalf("without a store every read should go to the primary, without LSN queries: %s", s.last())
+	if err := db.Use(&ReplicaRouting{TTL: time.Second}); err == nil {
+		t.Fatal("registering without a store should fail")
+	}
+	if db.Callback().Query().Get("replica:route_query") != nil {
+		t.Fatal("a failed registration should leave no callback")
 	}
 }
 
@@ -313,7 +310,7 @@ func TestReplicaRoutingPreloadTakesTheAccount(t *testing.T) {
 		t.Fatalf("expected the contact and the preloaded department: %v", *s.sqls)
 	}
 	for _, sql := range *s.sqls {
-		if hint := hintOf(sql); hint != "" {
+		if hint := hintOf(sql); hint != replicaHint {
 			t.Fatalf("read of an account without recent write, and its preload, should go to any replica: %s", sql)
 		}
 	}
@@ -334,7 +331,7 @@ func TestReplicaRoutingPreloadTakesTheAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sql := range *s.sqls {
-		if hint := hintOf(sql); hint != primaryHint {
+		if hint := hintOf(sql); hint != "" {
 			t.Fatalf("read by id without the account, and its preload, should go to the primary: %s", sql)
 		}
 	}
