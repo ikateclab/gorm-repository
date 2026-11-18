@@ -191,6 +191,39 @@ err = userRepo.RemoveAssociation(ctx, user, "Posts", []Post{oldPost})
 err = userRepo.ReplaceAssociation(ctx, user, "Posts", []Post{post1, post2})
 ```
 
+### Read Replica Routing (PgDog)
+
+`ReplicaRouting` sends reads to an asynchronous replica through [PgDog](https://docs.pgdog.dev) (v0.1.64 or
+later) with `read_write_split = "prefer_primary"`, keeping read-after-write consistency. PgDog then sends every
+query to the primary unless it opts in, so without the plugin nothing reaches the replica. Every write records the
+primary's WAL position (`pg_current_wal_insert_lsn()`) in `last_write:<accountId>:<table>` for `TTL`, after the
+repository `Tx` commits. A standalone read of a known account and tables gets `/* pgdog_role: replica */`, or
+`/* pgdog_role: replica pgdog_lsn: X/Y */` when those tables have a recorded LSN, so PgDog only sends it to a
+replica that has replayed that write, or to the primary.
+
+```go
+db.Use(&gormrepository.ReplicaRouting{
+    Store:       store,
+    TTL:         2 * time.Second,
+    LsnReadArgs: []any{pgx.QueryExecModeExec},
+})
+```
+
+- Each LSN makes a distinct SQL text. With pgx's default statement cache, every read with an LSN would become a
+  new prepared statement in pgx, PgDog and Postgres. `LsnReadArgs` go to the driver before those reads' args
+  only; `pgx.QueryExecModeExec` runs them unprepared and leaves the cache to the other queries.
+
+- `Store` (required) implements `LastWriteStore` (`Mark` keeps the highest LSN per key, `LastLsn` returns the
+  highest of the keys), usually Redis keys with a TTL. A store error sends the read to the primary. To turn
+  replica reads off, don't register the plugin.
+- Reads without an `accountId = ?` condition, raw SQL and string joins always go to the primary. Preloads
+  take the account of the query that loads them, and check their own table.
+- Raw writes (`db.Exec`) mark `last_write:_global:<table>`, which every account checks.
+- A write in a plain GORM transaction (`db.Transaction`), or whose LSN query fails, records an LSN no replica
+  reaches, so its reads go to the primary for `TTL`.
+- Past `TTL`, only PgDog's lag ban protects a read: `TTL` must exceed `ban_replica_lag` plus the ~700 ms PgDog
+  takes to ban (lag and bans are checked every 333 ms).
+
 ## Repository Interface
 
 The repository implements the following interface:
