@@ -3,8 +3,12 @@ package gormrepository
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -13,18 +17,23 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// LastWriteStore remembers recent writes per account and table (e.g. Redis keys with a TTL).
+// LastWriteStore keeps the WAL position (LSN) of the latest write per account and table, e.g. Redis keys with a TTL.
 type LastWriteStore interface {
-	Mark(ctx context.Context, key string, ttl time.Duration) error
-	AnyRecent(ctx context.Context, keys []string) (bool, error)
+	// Mark raises each key to lsn, never lowering it, and keeps it for ttl.
+	Mark(ctx context.Context, keys []string, lsn uint64, ttl time.Duration) error
+	// LastLsn returns the highest LSN among the keys, or 0 when none is set.
+	LastLsn(ctx context.Context, keys []string) (uint64, error)
 }
 
 const (
 	primaryHint   = "/* pgdog_role: primary */ "
+	lsnHintPrefix = "/* pgdog_lsn: "
 	globalScope   = "_global"
 	anyTable      = "*"
 	accountColumn = "accountId"
 	accountsTable = "accounts"
+	// unknownLsn is beyond any replica, so PgDog reads from the primary.
+	unknownLsn = math.MaxUint64
 )
 
 var (
@@ -34,21 +43,42 @@ var (
 	exprColumnsRe = regexp.MustCompile(`^\s*(?:"?\w+"?\.)?"?(\w+)"?\s*=\s*\?\s*$`)
 )
 
-// ReplicaRouting sends a read to the primary, through a PgDog hint, when its account and tables
-// were written within TTL. TTL must exceed PgDog's ban_replica_lag + lsn_check_interval.
+// ReplicaRouting tags a read with the LSN of the latest write of its account and tables, so PgDog only
+// sends it to a replica that has replayed that write. A nil Store sends every read to the primary.
 type ReplicaRouting struct {
 	Store LastWriteStore
-	TTL   time.Duration
+	// TTL keeps a write's LSN. Past it, only PgDog's lag ban protects the read: TTL must exceed
+	// ban_replica_lag plus the ~700 ms PgDog takes to ban.
+	TTL time.Duration
+	// CurrentLsn returns the primary's WAL position. Defaults to pg_current_wal_insert_lsn().
+	CurrentLsn func(ctx context.Context) (uint64, error)
+	// LsnReadArgs go to the driver before the args of a read with an LSN. Every LSN makes a distinct SQL, so
+	// with pgx pass pgx.QueryExecModeExec to keep those reads out of the prepared statement caches.
+	LsnReadArgs []any
 }
+
+// readAccountKey carries a query's account to its preloads, whose WHERE has only the foreign key.
+type readAccountKey struct{}
 
 func (r *ReplicaRouting) Name() string { return "gormrepository:replica_routing" }
 
 func (r *ReplicaRouting) Initialize(db *gorm.DB) error {
+	if r.CurrentLsn == nil {
+		r.CurrentLsn = func(ctx context.Context) (uint64, error) {
+			var lsn string
+			if err := db.WithContext(ctx).Raw(primaryHint + "SELECT pg_current_wal_insert_lsn()::text").Scan(&lsn).Error; err != nil {
+				return 0, err
+			}
+			return parseLsn(lsn)
+		}
+	}
 	cb := db.Callback()
 	afterCommit := "gorm:commit_or_rollback_transaction"
 	steps := []error{
 		cb.Query().Before("gorm:query").Register("replica:route_query", r.route),
 		cb.Row().Before("gorm:row").Register("replica:route_row", r.route),
+		cb.Query().After("gorm:query").Register("replica:drop_query_args", r.dropLsnReadArgs),
+		cb.Row().After("gorm:row").Register("replica:drop_row_args", r.dropLsnReadArgs),
 		cb.Create().After(afterCommit).Register("replica:mark_create", r.markWrite),
 		cb.Update().After(afterCommit).Register("replica:mark_update", r.markWrite),
 		cb.Delete().After(afterCommit).Register("replica:mark_delete", r.markWrite),
@@ -67,26 +97,51 @@ func (r *ReplicaRouting) route(db *gorm.DB) {
 		return
 	}
 	callbacks.BuildQuerySQL(db)
-	if !readSQLRe.MatchString(db.Statement.SQL.String()) || !r.readsFromPrimary(db.Statement) {
+	if !readSQLRe.MatchString(db.Statement.SQL.String()) {
 		return
 	}
-	sql := primaryHint + db.Statement.SQL.String()
+	hint := r.readHint(db.Statement)
+	if hint == "" {
+		return
+	}
+	sql := hint + db.Statement.SQL.String()
 	db.Statement.SQL.Reset()
 	db.Statement.SQL.WriteString(sql)
+	if strings.HasPrefix(hint, lsnHintPrefix) {
+		db.Statement.Vars = slices.Concat(r.LsnReadArgs, db.Statement.Vars)
+	}
 }
 
-func (r *ReplicaRouting) readsFromPrimary(stmt *gorm.Statement) bool {
+// dropLsnReadArgs runs after the read, so logs and errors show only the query's own vars.
+func (r *ReplicaRouting) dropLsnReadArgs(db *gorm.DB) {
+	if strings.HasPrefix(db.Statement.SQL.String(), lsnHintPrefix) {
+		db.Statement.Vars = db.Statement.Vars[len(r.LsnReadArgs):]
+	}
+}
+
+func (r *ReplicaRouting) readHint(stmt *gorm.Statement) string {
 	accountID, ok := accountFromWhere(stmt)
+	if ok {
+		stmt.Context = context.WithValue(stmt.Context, readAccountKey{}, accountID)
+	} else {
+		accountID, ok = scopeValue(stmt.Context.Value(readAccountKey{}), true)
+	}
 	tables, known := readTables(stmt)
-	if !ok || !known {
-		return true
+	if r.Store == nil || !ok || !known {
+		return primaryHint
 	}
 	keys := make([]string, 0, 2*(len(tables)+1))
 	for _, table := range append(tables, anyTable) {
 		keys = append(keys, lastWriteKey(accountID, table), lastWriteKey(globalScope, table))
 	}
-	recent, err := r.Store.AnyRecent(stmt.Context, keys)
-	return err != nil || recent
+	lsn, err := r.Store.LastLsn(stmt.Context, keys)
+	if err != nil {
+		return primaryHint
+	}
+	if lsn == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s%X/%X */ ", lsnHintPrefix, lsn>>32, uint32(lsn))
 }
 
 func (r *ReplicaRouting) markWrite(db *gorm.DB) {
@@ -115,18 +170,49 @@ func (r *ReplicaRouting) markRaw(db *gorm.DB) {
 	r.mark(db, lastWriteKey(globalScope, table))
 }
 
-// mark records the write now, when GORM has already committed it, or when the repository Tx commits.
+// mark records the write with the primary's LSN once it is committed: now, or when the repository Tx commits.
 func (r *ReplicaRouting) mark(db *gorm.DB, key string) {
+	if r.Store == nil {
+		return
+	}
 	ctx := context.WithoutCancel(db.Statement.Context)
-	write := func() { _ = r.Store.Mark(ctx, key, r.TTL) }
 	if v, ok := db.Get(txContextKey); ok {
 		if tx, ok := v.(*Tx); ok {
-			tx.AfterCommit(write)
+			tx.afterCommitWrites(key, func(keys []string) { _ = r.Store.Mark(ctx, keys, r.currentLsn(ctx), r.TTL) })
 			return
 		}
 	}
-	// A plain GORM transaction has no commit hook: mark now, as best effort.
-	write()
+	lsn := uint64(unknownLsn)
+	// A plain GORM transaction has no commit hook, so its commit LSN is unknown.
+	if !inTransaction(db) {
+		lsn = r.currentLsn(ctx)
+	}
+	_ = r.Store.Mark(ctx, []string{key}, lsn, r.TTL)
+}
+
+func (r *ReplicaRouting) currentLsn(ctx context.Context) uint64 {
+	lsn, err := r.CurrentLsn(ctx)
+	if err != nil {
+		return unknownLsn
+	}
+	return lsn
+}
+
+// parseLsn reads Postgres' "X/Y" notation.
+func parseLsn(text string) (uint64, error) {
+	high, low, ok := strings.Cut(text, "/")
+	if !ok {
+		return 0, fmt.Errorf("invalid LSN %q", text)
+	}
+	h, err := strconv.ParseUint(high, 16, 32)
+	if err != nil {
+		return 0, err
+	}
+	l, err := strconv.ParseUint(low, 16, 32)
+	if err != nil {
+		return 0, err
+	}
+	return h<<32 | l, nil
 }
 
 func lastWriteKey(accountID, table string) string {

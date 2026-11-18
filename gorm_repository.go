@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -403,6 +405,8 @@ type Tx struct {
 	mutex          sync.RWMutex
 	parent         *Tx
 	afterCommit    []func()
+	// writes are the replica routing keys written in the transaction.
+	writes map[string]struct{}
 }
 
 // BeginTransaction starts a nested transaction
@@ -417,15 +421,35 @@ func (tx *Tx) BeginTransaction() *Tx {
 	}
 }
 
-// AfterCommit runs fn once the outermost transaction commits.
-func (tx *Tx) AfterCommit(fn func()) {
+func (tx *Tx) root() *Tx {
 	root := tx
 	for root.parent != nil {
 		root = root.parent
 	}
+	return root
+}
+
+// AfterCommit runs fn once the outermost transaction commits.
+func (tx *Tx) AfterCommit(fn func()) {
+	root := tx.root()
 	root.mutex.Lock()
 	defer root.mutex.Unlock()
 	root.afterCommit = append(root.afterCommit, fn)
+}
+
+// afterCommitWrites collects the transaction's written keys and hands them all to fn once it commits.
+func (tx *Tx) afterCommitWrites(key string, fn func(keys []string)) {
+	root := tx.root()
+	root.mutex.Lock()
+	first := root.writes == nil
+	if first {
+		root.writes = map[string]struct{}{}
+	}
+	root.writes[key] = struct{}{}
+	root.mutex.Unlock()
+	if first {
+		tx.AfterCommit(func() { fn(slices.Collect(maps.Keys(root.writes))) })
+	}
 }
 
 // Commit commits the transaction

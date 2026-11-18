@@ -194,19 +194,33 @@ err = userRepo.ReplaceAssociation(ctx, user, "Posts", []Post{post1, post2})
 ### Read Replica Routing (PgDog)
 
 `ReplicaRouting` keeps read-after-write consistency when reads go to an asynchronous replica through
-[PgDog](https://docs.pgdog.dev). Every write records `last_write:<accountId>:<table>` for `TTL`, after
-the repository `Tx` commits. A read whose account and tables were written within `TTL` gets the
-`/* pgdog_role: primary */` hint; every other standalone read is left for PgDog to send to the replica.
+[PgDog](https://docs.pgdog.dev) (v0.1.64 or later). Every write records the primary's WAL position
+(`pg_current_wal_insert_lsn()`) in `last_write:<accountId>:<table>` for `TTL`, after the repository `Tx`
+commits. A read of an account and tables with a recorded LSN gets `/* pgdog_lsn: X/Y */`, so PgDog only
+sends it to a replica that has replayed that write, or to the primary; other standalone reads go to any replica.
 
 ```go
-db.Use(&gormrepository.ReplicaRouting{Store: store, TTL: 100 * time.Millisecond})
+db.Use(&gormrepository.ReplicaRouting{
+    Store:       store,
+    TTL:         2 * time.Second,
+    LsnReadArgs: []any{pgx.QueryExecModeExec},
+})
 ```
 
-- `Store` implements `LastWriteStore` (`Mark` and `AnyRecent`), usually Redis keys with a TTL. A store
-  error sends the read to the primary.
-- Reads without an `accountId = ?` condition, raw SQL and string joins always go to the primary.
+- Each LSN makes a distinct SQL text. With pgx's default statement cache, every read with an LSN would become a
+  new prepared statement in pgx, PgDog and Postgres. `LsnReadArgs` go to the driver before those reads' args
+  only; `pgx.QueryExecModeExec` runs them unprepared and leaves the cache to the other queries.
+
+- `Store` implements `LastWriteStore` (`Mark` keeps the highest LSN per key, `LastLsn` returns the highest
+  of the keys), usually Redis keys with a TTL. A store error sends the read to the primary. A nil `Store`
+  sends every read to the primary.
+- Reads without an `accountId = ?` condition, raw SQL and string joins always go to the primary. Preloads
+  take the account of the query that loads them, and check their own table.
 - Raw writes (`db.Exec`) mark `last_write:_global:<table>`, which every account checks.
-- `TTL` must exceed PgDog's `ban_replica_lag + lsn_check_interval`.
+- A write in a plain GORM transaction (`db.Transaction`), or whose LSN query fails, records an LSN no replica
+  reaches, so its reads go to the primary for `TTL`.
+- Past `TTL`, only PgDog's lag ban protects a read: `TTL` must exceed `ban_replica_lag` plus the ~700 ms PgDog
+  takes to ban (lag and bans are checked every 333 ms).
 
 ## Repository Interface
 
